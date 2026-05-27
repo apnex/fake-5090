@@ -1,0 +1,26 @@
+# Build artifacts
+target/
+build/
+*.o
+*.a
+*.so
+*.so.*
+
+# Vendored dependencies (built output, not sources)
+vendor/*/build/
+vendor/*/target/
+
+# Rust
+Cargo.lock.bak
+**/*.rs.bk
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local working files
+notes/scratch/
+*.local.md
