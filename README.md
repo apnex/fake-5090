@@ -86,7 +86,11 @@ does.
    VM ever dies, and it dies on demand.
 3. **Scriptable failure injection.** Every interesting failure mode
    is a state the daemon can be told to enter from outside, over a
-   control channel. No recompilation to trigger a new scenario.
+   control channel. Surprise removal — the marquee failure for
+   eGPUs — is fully reproducible from the driver's perspective, in
+   three orthogonal flavours (silent device-lost, graceful hot-
+   remove, hierarchy-yank) plus combinations. See SURVEY.md §3.1.
+   No recompilation to trigger a new scenario.
 4. **CI-friendly.** Headless, deterministic, containerised. A
    downstream consumer should be able to wire fake-5090 into a
    GitHub Actions job and have it Just Work.

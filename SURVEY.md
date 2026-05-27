@@ -142,10 +142,51 @@ set sits at exactly the layer fake-5090 models well:
 | PCIe primitives (read/write/recovery) | Hit via normal driver init; exercised end-to-end           |
 | Bus-loss watchdog       | Daemon enters "bus lost" state; verify watchdog fires within SLA      |
 | Recovery (reset + re-enum) | vfio-user `DEVICE_RESET` protocol; daemon replays init           |
-| Close-path telemetry    | QMP `device_del` simulates surprise removal                           |
+| Surprise removal        | **Three orthogonal mechanisms** (see §3.1)                            |
+| Close-path telemetry    | Mechanism B (graceful hot-remove via QMP `device_del`)                |
 
 Stateful MMIO modelling is the long pole — defer the deepest
 recovery-flow modelling to phase 2.
+
+### 3.1 Surprise removal — the highest-value test family
+
+Surprise removal is the marquee scenario fake-5090 exists to
+exercise, and it splits into three orthogonal mechanisms. Each
+models a different real-world failure shape from the driver's
+perspective; each lives behind a control-socket trigger.
+
+**Mechanism A — daemon enters `DeviceLost` state mid-operation.**
+The daemon's state machine flips into a "device is gone" mode.
+Subsequent config-space and BAR MMIO reads return `0xFFFFFFFF`;
+writes are silently dropped (no error returned to QEMU, mirroring
+how dead silicon behaves); no MSI is ever raised again. The driver
+gets *silence and 0xFF*, which is exactly what a real surprise-
+removed device produces until the kernel's PCIe layer notices and
+synthesises a remove. This is the truest test of bus-loss watchdog
+and gpu-lost-retry paths. **No `.remove()` callback fires** — the
+driver must detect the loss itself.
+
+**Mechanism B — graceful PCIe hot-remove via QMP.**
+`{"execute":"device_del","arguments":{"id":"fake-5090-leaf"}}` over
+the QMP socket. QEMU invokes the orderly PCIe hot-remove protocol;
+pciehp fires; the driver's `.remove()` callback runs in the *normal*
+code path. Tests close-path telemetry and orderly teardown — a
+distinct set of paths from Mechanism A.
+
+**Mechanism C — yank the whole switch hierarchy.**
+`device_del` against the root port removes the leaf, both switch
+ports, and the GPU together. Models an eGPU enclosure power-cut or
+host-side cable yank. Stresses ordering assumptions: does the
+driver cope when the parent bridge disappears before the child has
+finished cleanup?
+
+**Mechanism D — combined race (A then B, microsecond-timed).**
+Daemon enters `DeviceLost`; 50ms later QEMU emits `device_del`.
+Races bus-loss-watchdog detection against orderly removal — a known
+field-bug shape for eGPUs where the driver enters recovery just as
+the OS decides to tear down. Real hardware produces this race
+randomly; fake-5090 produces it on every run with deterministic
+timing. This is the kind of test only fake-5090 can run.
 
 ---
 
@@ -210,11 +251,31 @@ recovery-flow modelling to phase 2.
 - **Stateful MMIO modelling has a long tail.** Recovery flows
   require the most modelling. Defer to phase 2; ship phase 1 with a
   static-fixture model first.
-- **Thunderbolt-specific behaviours** (surprise removal mid-DMA,
-  link-flap during firmware update, USB4 tunnel renegotiation) are
-  hard to model in pure software. `aer-inject` + real-device testing
-  remains essential for confidence here. fake-5090 should not aspire
-  to fully replace it — it complements it.
+- **Residual gaps requiring real hardware.** fake-5090 simulates
+  surprise removal directly (see §3.1) — but a thin layer of
+  peripheral phenomena that *co-occur* with removal on real silicon
+  cannot be modelled in pure software:
+  - **LTSSM link-training states.** The Link Training and Status
+    State Machine lives in silicon. If a bug depends on observing a
+    specific transient LTSSM state during recovery, fake-5090 can't
+    reproduce it.
+  - **Partial in-flight DMA.** The daemon can drop MMIO writes
+    mid-burst, but real hardware may have written *some* bytes to
+    host memory before the link dropped. Modellable via vfio-user
+    `DMA_MAP` (the daemon has access to guest pages) but non-trivial;
+    deferred past phase 2.
+  - **Thunderbolt-layer races.** TB controller firmware, USB4 tunnel
+    renegotiation, side-band channel. If a bug depends on the TB
+    stack racing the PCIe stack *outside the driver*, still needs
+    real hardware.
+  - **AER signal vs link-drop ordering.** Real silicon non-
+    deterministically interleaves fatal AER with link drop; QEMU
+    injects deterministically. Good for testing, but doesn't
+    naturally reproduce spec-ambiguous orderings.
+  These are real gaps. None of them are surprise removal itself —
+  they're peripheral phenomena that co-occur with it. `aer-inject`
+  against a real card (scripts/, Phase 0) covers what fake-5090
+  cannot.
 - **NVIDIA's driver checks device IDs at multiple points.** Need to
   confirm a 5090 ID is recognised by the *currently shipping*
   consumer driver. If not, fall back to a 4090 ID. Make this
