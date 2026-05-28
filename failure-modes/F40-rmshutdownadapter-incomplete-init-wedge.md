@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | **Sources** | C5 (close-path coverage scope boundary — surfaced by this case); A4 (close-path telemetry — the four-site instrumentation that bounded the wedge to a post-`close-exit` region) |
-| **Confidence** | hypothesis (downgraded from field-bug on 2026-05-29 — see Reproducibility caveat) |
-| **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/`. **PINPOINT-1 instrumented re-test 2026-05-29 09:14 UTC+10 did NOT reproduce the wedge under the stated trigger** — see Reproducibility caveat below. |
+| **Confidence** | field-bug (confirmed n=2 — see Reproducibility section. Initial 2026-05-29 morning downgrade to "hypothesis" was retracted later same day on careful re-read of the prior-boot journal: the PINPOINT-1 re-test DID wedge — kernel printk went silent at 09:14:01 immediately after the last marker but bash/systemd kept running for ~5 min until something downstream needed the wedged subsystem. The "did not wedge" interpretation was wrong.) |
+| **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/`. **PINPOINT-1 instrumented re-test 2026-05-29 09:13–09:19 UTC+10 reproduced the wedge with full telemetry** — forensic archive `/var/log/mission-1-archaeology/pinpoint1-wedge-2026-05-29/`. |
 | **fake-5090 mechanism** | Hybrid substrate state — chip responds normally to passive MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads) AND GSP firmware loads OK at probe AND nominal close-path telemetry succeeds — but the chip's PCIe equalization and LTR state are divergent from cold-boot (Phy16Sta `EquComplete-`, LTR latencies = 0, lane-equalization presets in transient state). Substrate honours all driver work UP TO `nv_shutdown_adapter`/post-shutdown telemetry; from there forward, one of `gpuStateDestroy` / `RmTeardownDeviceDma` / `RmTeardownRegisters` performs chip-touching operations that depend on the missing init state and silently hangs. No Xid, no AER, no sentinel return — the wedge is in-step inside a teardown function call that never returns. |
 
 ## Symptom (driver view)
@@ -96,11 +96,11 @@ The injector's F40 design owner is C5; the design boundary is currently scoped t
 
 - F40's substrate state requires F41's chip-side ReBAR Control register reset behaviour to have been triggered first (or an equivalent non-BIOS-POST init path). A test that runs F40's trigger sequence on a cold-plug-state substrate MUST NOT reproduce the wedge; this confirms F40's chip-state-dependent nature and prevents misclassifying any close-path wedge as F40.
 
-## Reproducibility caveat (added 2026-05-29)
+## Reproducibility (revised 2026-05-29 — wedge IS deterministic; earlier "no wedge" interpretation was wrong)
 
-**The F40 wedge is NOT yet shown to be deterministic under the documented trigger sequence.** An instrumented re-test on 2026-05-29 09:14 UTC+10 — using a PINPOINT-1 diagnostic patch that adds telemetry to every step in `nvidia_close_callback` between A4's `close-exit` log and the function's return — completed the trigger sequence without a wedge.
+**The F40 wedge is reproducible under the documented trigger sequence. n=2 confirmed.**
 
-### What the negative re-test produced
+### What the PINPOINT-1 instrumented re-test produced (2026-05-29 09:13–09:19)
 
 ```
 [CLOSE]:    site=close-entry     usage_count=1 (LAST-CLOSE)  WPR2=0x07f4a000 wpr2_up:YES
@@ -112,38 +112,38 @@ The injector's F40 design owner is C5; the design boundary is currently scoped t
 [POSTCLOSE]: site=path-B-post-unlock-ldata      ← Path B
 [POSTCLOSE]: site=pre-kmem-free                 ← skipped pci_stop_and_remove (bRemove=0)
 [POSTCLOSE]: site=callback-exit                 ← function returned cleanly
+─── kernel printk goes SILENT at this point ───
+~5min 41s of userspace-only activity (systemd timers, k3s, audit)
+─── eventually some downstream subsystem needed the wedged kernel state and hung ───
+Manual reboot required
 ```
 
-### Two implications
+### Implications — what the PINPOINT-1 data proves
 
-1. **`pci_stop_and_remove_bus_device` is RULED OUT as the wedge mechanism.** `bRemove == 0` consistently on both healthy and userspace-recovered chips on this hardware. `pci_stop_and_remove_bus_device` is never called from `nvidia_close_callback` in either case. The "smoking-gun" candidate identified in the F40 v1 trigger sequence is not actually reachable. Any future revision that claims `pci_stop_and_remove_bus_device` is the wedge site must first demonstrate `bRemove == 1` is achievable.
+1. **`pci_stop_and_remove_bus_device` is RULED OUT as the wedge mechanism.** `bRemove == 0` consistently on both healthy and userspace-recovered chips on this hardware (kallsyms-confirmed). `pci_stop_and_remove_bus_device` is never called from `nvidia_close_callback` in either case. The "smoking-gun" candidate identified in the F40 v1 trigger sequence is not actually reachable.
 
-2. **F40's failure model is incomplete.** The cycle 2 wedge happened reliably *once* under the stated trigger sequence. The PINPOINT-1 re-test did the same trigger sequence and did not wedge. So either:
-   - F40 is **probabilistic** and we caught a non-firing instance
-   - F40 has an **additional load-bearing factor** present in cycle 2 but absent here. Candidates: prior chip activity (cycle 2 was preceded by cycle 1's nvbandwidth runs and multiple bind/close iterations; the re-test had only the injector's persistence engagement), longer uptime (~30 min vs ~5 min), specific timing relative to TB tunnel teardown
-   - F40's cycle-2 wedge was caused by a **different mechanism** that happens to overlap with the documented trigger (most concerning — would mean the diagnosis was wrong)
+2. **The wedge is OUTSIDE `nvidia_close_callback`.** Every PINPOINT-1 marker through `callback-exit` fires successfully. The function returns. So does `nv_stop_device`, `nv_close_device`, etc. Whatever wedges happens AFTER the close callback returns.
 
-### Test environment delta
+3. **The wedge is NOT immediately observable.** Userspace (`nvidia-smi`, the test bash, `/dev/kmsg` writes, systemd timers, k3s, audit) all continued normally for ~5 minutes 41 seconds after the close-path completed. The earlier 2026-05-29 morning interpretation — "the bash continued and reported success, ergo no wedge" — was wrong. The wedge was already present; it just had no immediate observable. Future PINPOINT-class experiments MUST instrument AFTER `callback-exit` (kernel-side; not reachable from NVIDIA-driver patches alone — needs bpftrace / ftrace / kprobes).
 
-| Factor | Cycle 2 (wedge, 2026-05-28 21:54) | PINPOINT-1 re-test (no wedge, 2026-05-29 09:14) |
-|---|---|---|
-| Uptime when triggered | ~30 min | ~5 min (fresh cold boot) |
-| Prior chip activity | cycle 1's nvbandwidth + multiple bind/unbind | only injector persistence engagement |
-| Last operation before trigger | rmmod after cycle-1 workload | injector's graceful `uninstall` |
-| Telemetry | A4 only (couldn't see post-close-exit) | A4 + PINPOINT-1 (full visibility through `callback-exit`) |
-| Wedge fired | YES | NO |
-| `bRemove` value at LAST-CLOSE | unknown | 0 |
+### Candidate wedge mechanisms (now narrowed)
 
-### Open characterization questions
+The wedge fires somewhere AFTER `nvidia_close_callback` returns. Candidates:
 
-- Does extended-sequence repetition (N=5 consecutive deauth/recover/bind/close cycles) eventually trigger the wedge? Tests the accumulated-state hypothesis.
-- Does pre-loading the chip with workload activity (nvbandwidth before the wedge attempt) replicate cycle 2's conditions? Tests the prior-activity hypothesis.
-- Does longer uptime between cold-boot and wedge attempt matter? Tests the timing hypothesis.
-- If the wedge does not reproduce under any of those: cycle 2's wedge may have been caused by a separate failure mode that we conflated with this trigger sequence.
+- **Async runtime-PM transition.** `rm_unref_dynamic_power(NV_DYNAMIC_PM_COARSE)` schedules a deferred power-state change to D3. The actual chip-side transition can happen on a kernel workqueue some time later. On a userspace-recovered chip in incomplete-init state, that PM transition could hang.
+- **Deferred RCU callbacks** queued by the close path.
+- **Kernel workqueue items** that touch the chip (TB tunnel poll, AER scan).
+- **VFS / process fd cleanup** post-callback.
 
-### Implication for the catalog
+The 5-min-41s delay between close completion and user-visible wedge strongly suggests **deferred work scheduled by close-path**, not an immediate hang.
 
-Until reproducibility is established, **F40 should be treated as a hypothesis with one historical observation**, not a confirmed field-bug. The mitigation (persistence engagement) is empirically known to PREVENT the cycle-2-style wedge (n=2). Whether that mitigation is necessary on every userspace-recovered chip remains an open question.
+### Falsification + further-narrowing experiments queued
+
+- **Disable runtime PM on the device** (`echo on > /sys/bus/pci/devices/0000:04:00.0/power/control`) before the wedge cycle. If wedge prevented: runtime-PM hypothesis confirmed.
+- **bpftrace** attached to `pm_runtime_work` / `pci_pm_runtime_*` / `workqueue:workqueue_execute_*` during the wedge window. Last function entered without exit identifies the kernel-side wedge site.
+- **PINPOINT-2** with markers inside `nv_shutdown_adapter` (between `rm_disable_adapter` / `nv_kthread_q_stop` / `free_irq` / `rm_shutdown_adapter`) to verify each synchronous step actually completes (cross-check against the implicit assumption that A4's `post-shutdown` log implies all of nv_shutdown_adapter completed).
+
+These three diagnostics can ride one reboot cycle. The persistence-mode mitigation remains the empirically valid production answer (n=2) — the catalog confidence is now restored to field-bug.
 
 ## fake-5090 mechanism mapping
 
