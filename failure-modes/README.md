@@ -25,8 +25,8 @@
 | Cluster-layer-only (route to real k8s cluster) | 2 (F36, F37) |
 | Not-reproducible-by-design (telemetry-presence asserted instead) | 2 (F11, F13) |
 | Documentation-class entries (no runtime assertion) | 1 (F38) |
-| Confidence: field-bug | 21 |
-| Confidence: hypothesis | 11 |
+| Confidence: field-bug | 20 |
+| Confidence: hypothesis | 12 |
 | Confidence: community-evidence | 8 |
 | Confidence: doc-only (misattributed but documented) | 1 |
 
@@ -49,7 +49,7 @@
 | [F24](F24-sanity-check-noise-budget.md) | Sanity-check noise — diagnostic `NV_PRINTF` lines reachable on lost-GPU paths | C5 (v3 sanity-check class) | hypothesis | Surprise-removal A + dmesg-noise budget assertion |
 | [F25](F25-dump-rpc-self-dos.md) | Crash-dump RPC self-DoS — `DUMP_PROTOBUF_COMPONENT` fn 78 blocks 5 s | C5 (v4) | field-bug | Surprise-removal A + crash-dump RPC scenario |
 | [F28](F28-client-count-warn-cascade.md) | Client-count `WARN_ON` cascade — kernel-side close-path WARN floods on lost GPU | C5 (v4) | hypothesis | Surprise-removal A + active-client FD scenario |
-| [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | C5 (out-of-scope class — documented coverage boundary); A4 (telemetry that bounded the wedge) | field-bug | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
+| [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | C5 (out-of-scope class — documented coverage boundary); A4 (telemetry that bounded the wedge) | hypothesis (downgraded 2026-05-29; PINPOINT-1 re-test did not reproduce — see Reproducibility caveat in F40) | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
 
 ### Layer 2 — Driver-internal cascade (cross-module)
 

@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | **Sources** | C5 (close-path coverage scope boundary — surfaced by this case); A4 (close-path telemetry — the four-site instrumentation that bounded the wedge to a post-`close-exit` region) |
-| **Confidence** | field-bug |
-| **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/` |
+| **Confidence** | hypothesis (downgraded from field-bug on 2026-05-29 — see Reproducibility caveat) |
+| **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/`. **PINPOINT-1 instrumented re-test 2026-05-29 09:14 UTC+10 did NOT reproduce the wedge under the stated trigger** — see Reproducibility caveat below. |
 | **fake-5090 mechanism** | Hybrid substrate state — chip responds normally to passive MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads) AND GSP firmware loads OK at probe AND nominal close-path telemetry succeeds — but the chip's PCIe equalization and LTR state are divergent from cold-boot (Phy16Sta `EquComplete-`, LTR latencies = 0, lane-equalization presets in transient state). Substrate honours all driver work UP TO `nv_shutdown_adapter`/post-shutdown telemetry; from there forward, one of `gpuStateDestroy` / `RmTeardownDeviceDma` / `RmTeardownRegisters` performs chip-touching operations that depend on the missing init state and silently hangs. No Xid, no AER, no sentinel return — the wedge is in-step inside a teardown function call that never returns. |
 
 ## Symptom (driver view)
@@ -95,6 +95,55 @@ The injector's F40 design owner is C5; the design boundary is currently scoped t
 **Cross-reference assertion (to F41):**
 
 - F40's substrate state requires F41's chip-side ReBAR Control register reset behaviour to have been triggered first (or an equivalent non-BIOS-POST init path). A test that runs F40's trigger sequence on a cold-plug-state substrate MUST NOT reproduce the wedge; this confirms F40's chip-state-dependent nature and prevents misclassifying any close-path wedge as F40.
+
+## Reproducibility caveat (added 2026-05-29)
+
+**The F40 wedge is NOT yet shown to be deterministic under the documented trigger sequence.** An instrumented re-test on 2026-05-29 09:14 UTC+10 — using a PINPOINT-1 diagnostic patch that adds telemetry to every step in `nvidia_close_callback` between A4's `close-exit` log and the function's return — completed the trigger sequence without a wedge.
+
+### What the negative re-test produced
+
+```
+[CLOSE]:    site=close-entry     usage_count=1 (LAST-CLOSE)  WPR2=0x07f4a000 wpr2_up:YES
+[CLOSE]:    site=pre-stop        usage_count=1 (LAST-CLOSE)  WPR2=0x07f4a000 wpr2_up:YES
+[CLOSE]:    site=post-shutdown   usage_count=0 (LAST-CLOSE)  WPR2=0x00000000 wpr2_up:no
+[CLOSE]:    site=close-exit      usage_count=0 (LAST-CLOSE)  WPR2=0x00000000 wpr2_up:no
+[POSTCLOSE]: site=post-close-exit bRemove=0     ← bRemove is FALSE
+[POSTCLOSE]: site=post-free-private
+[POSTCLOSE]: site=path-B-post-unlock-ldata      ← Path B
+[POSTCLOSE]: site=pre-kmem-free                 ← skipped pci_stop_and_remove (bRemove=0)
+[POSTCLOSE]: site=callback-exit                 ← function returned cleanly
+```
+
+### Two implications
+
+1. **`pci_stop_and_remove_bus_device` is RULED OUT as the wedge mechanism.** `bRemove == 0` consistently on both healthy and userspace-recovered chips on this hardware. `pci_stop_and_remove_bus_device` is never called from `nvidia_close_callback` in either case. The "smoking-gun" candidate identified in the F40 v1 trigger sequence is not actually reachable. Any future revision that claims `pci_stop_and_remove_bus_device` is the wedge site must first demonstrate `bRemove == 1` is achievable.
+
+2. **F40's failure model is incomplete.** The cycle 2 wedge happened reliably *once* under the stated trigger sequence. The PINPOINT-1 re-test did the same trigger sequence and did not wedge. So either:
+   - F40 is **probabilistic** and we caught a non-firing instance
+   - F40 has an **additional load-bearing factor** present in cycle 2 but absent here. Candidates: prior chip activity (cycle 2 was preceded by cycle 1's nvbandwidth runs and multiple bind/close iterations; the re-test had only the injector's persistence engagement), longer uptime (~30 min vs ~5 min), specific timing relative to TB tunnel teardown
+   - F40's cycle-2 wedge was caused by a **different mechanism** that happens to overlap with the documented trigger (most concerning — would mean the diagnosis was wrong)
+
+### Test environment delta
+
+| Factor | Cycle 2 (wedge, 2026-05-28 21:54) | PINPOINT-1 re-test (no wedge, 2026-05-29 09:14) |
+|---|---|---|
+| Uptime when triggered | ~30 min | ~5 min (fresh cold boot) |
+| Prior chip activity | cycle 1's nvbandwidth + multiple bind/unbind | only injector persistence engagement |
+| Last operation before trigger | rmmod after cycle-1 workload | injector's graceful `uninstall` |
+| Telemetry | A4 only (couldn't see post-close-exit) | A4 + PINPOINT-1 (full visibility through `callback-exit`) |
+| Wedge fired | YES | NO |
+| `bRemove` value at LAST-CLOSE | unknown | 0 |
+
+### Open characterization questions
+
+- Does extended-sequence repetition (N=5 consecutive deauth/recover/bind/close cycles) eventually trigger the wedge? Tests the accumulated-state hypothesis.
+- Does pre-loading the chip with workload activity (nvbandwidth before the wedge attempt) replicate cycle 2's conditions? Tests the prior-activity hypothesis.
+- Does longer uptime between cold-boot and wedge attempt matter? Tests the timing hypothesis.
+- If the wedge does not reproduce under any of those: cycle 2's wedge may have been caused by a separate failure mode that we conflated with this trigger sequence.
+
+### Implication for the catalog
+
+Until reproducibility is established, **F40 should be treated as a hypothesis with one historical observation**, not a confirmed field-bug. The mitigation (persistence engagement) is empirically known to PREVENT the cycle-2-style wedge (n=2). Whether that mitigation is necessary on every userspace-recovered chip remains an open question.
 
 ## fake-5090 mechanism mapping
 
