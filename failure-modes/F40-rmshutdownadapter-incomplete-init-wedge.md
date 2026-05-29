@@ -1,12 +1,17 @@
 # F40 — chip re-init wedge on userspace-recovered eGPU (PCIe Completion Timeout race)
 
-> **Note on the title.** The original "`RmShutdownAdapter` destructive-teardown wedge" framing was disproved by the 2026-05-29 investigation — see §Current understanding below. The wedge is in the chip re-init MMIO path that runs on the FIRST OPEN AFTER a clean LAST-CLOSE, not in `RmShutdownAdapter` itself. The title is preserved for traceability; the body has been refreshed and the historical investigation log (all the falsified hypotheses, layered theories, and intermediate findings) is preserved at the bottom of this document.
+> **Note on the title.** The original "`RmShutdownAdapter` destructive-teardown wedge" framing was disproved by the 2026-05-29 morning/afternoon investigation, then partially re-vindicated by the evening A7 Test A n=2 validation. The picture as of 2026-05-29 22:08 is that F40 is a **two-arm failure class**:
+>
+> - **F40-open arm** (open path, RmInitAdapter MMIO hang) — fires on cycle-2 open of a userspace-recovered chip. F40-precondition-state-dependent. Closed by A6.
+> - **F40-shutdown arm** (rmmod path, rm_shutdown_adapter MMIO hang) — fires on every healthy rmmod on this hardware. Structural, NOT F40-precondition-dependent. Closed by A7.
+>
+> The original "destructive teardown wedge" title turns out to describe the F40-shutdown arm correctly (rm_shutdown_adapter is INSIDE destructive teardown), even though the morning investigation thought it was only an artefact of the open-path arm. Title preserved for traceability. Body has been refreshed twice now (morning revision pinning the open-path mechanism, evening A7 Test A revision capturing the shutdown-path mechanism). Historical investigation log preserved at the bottom.
 
 | Field | Value |
 |---|---|
-| **Sources** | C5 (sink primitive used by F40b's timeout path); A4 (close-path telemetry that bounded the investigation); A6 (the F40b Tier 2 bounded-wait wrapper that structurally closes the wedge) |
-| **Confidence** | field-bug (n=13+ wedge reproductions during 2026-05-29 investigation); structurally closed via A6 at n=2 validation (F40B-TEST runs 19:48 and 19:50, 2026-05-29) |
-| **Predecessor evidence** | injector repo `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md`; forensic archives `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/` through `/var/log/mission-1-archaeology/tbv2n2-wedge-2026-05-29/` (13 wedge boots) |
+| **Sources** | C5 (sink primitive used by both F40b timeout paths); A4 (close-path telemetry that bounded the investigation); **A6** (F40b Tier 2 bounded-wait wrapper that structurally closes the OPEN arm); **A7** (F40b Tier 2 bounded-wait wrapper that structurally closes the SHUTDOWN arm — added 2026-05-29 evening) |
+| **Confidence** | field-bug (n=13+ wedge reproductions during 2026-05-29 day); OPEN arm structurally closed via A6 at n=2 validation (F40B-TEST runs 19:48 and 19:50); SHUTDOWN arm discovered via 20:52 forensics report and structurally closed via A7 at n=2 validation (Test A runs 21:56:55 and 22:06:35, see `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A7-test-A-validation-2026-05-29.md`) |
+| **Predecessor evidence** | injector repo `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md`; forensic archives `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/` through `/var/log/mission-1-archaeology/tbv2n2-wedge-2026-05-29/` (13 wedge boots, all OPEN arm); `/var/log/mission-1-archaeology/a7-deploy-wedge-2026-05-29/FORENSICS-REPORT.md` (1 SHUTDOWN arm wedge, the trigger for the A7 work) |
 | **fake-5090 mechanism** | Substrate models a chip in *userspace-recovered-after-prior-bind* init state. Chip responds normally to PASSIVE MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads). Chip does NOT respond to the chip-init MMIO TLP that `RmInitAdapter` issues during `nv_open_device_for_nvlfp` on the second open of a fresh fd cycle. PCIe Completion Timeout fires on the root complex; AER signaling MAY race against a kernel-wide deadlock from the blocked MMIO read. Without the F40b Tier 2 wrapper, the deadlock wins frequently and the host hangs hard. |
 
 ## Current understanding (2026-05-29 evening — supersedes investigation log below)
@@ -37,9 +42,39 @@
 
 5. **The chip-side root cause is OUT-OF-SCOPE for this catalog.** The chip not responding to RmInitAdapter's MMIO on a userspace-recovered substrate IS the underlying defect. We do not have visibility into the chip's silicon/firmware state; this is NVIDIA's territory (or future kernel-side TB-aware patches). What we DO control is the host-side response to the chip's misbehaviour.
 
-### Structural close (A6 — F40b Tier 2 bounded-wait wrapper)
+### Mechanism — SHUTDOWN arm (added 2026-05-29 evening — n=2 validation, A7 Test A)
 
-A6 (committed at `nvidia-driver-injector@c8d3c68`, validated 2026-05-29 evening at n=2) wraps `nv_open_device_for_nvlfp` for E1-classified eGPUs in a bounded-wait pattern:
+The 20:52 FORENSICS-REPORT documented a host wedge during a k8s-driven pod restart that included `rmmod nvidia → modprobe nvidia`. A6 was loaded; the wedge was on the rmmod-side, not the modprobe-side. A7 was developed to wrap the chip-touching MMIO inside `nv_shutdown_adapter` (specifically `rm_disable_adapter` and `rm_shutdown_adapter`) in the same bounded-wait pattern A6 uses on the open path.
+
+A7 Test A n=2 (21:56:55, 22:06:35) produced a sharper finding than expected: **the rm_shutdown_adapter MMIO hang fires on every healthy rmmod on this hardware**, not just on chips already in F40-precondition state.
+
+1. **Precondition.** None — the chip can be in any healthy state. Both test runs were on chips that had been operating cleanly with persistence engaged. No prior F40 fire, no userspace-recovered substrate, no chronic timeout symptom. Just a normal `kubectl exec entrypoint.sh uninstall` on a healthy driver.
+
+2. **Teardown sequence inside `nv_shutdown_adapter`.**
+   - `rm_disable_adapter(sp, nv)` — A7's first wrap. Chip responds within the 200 ms budget. Wrapper logs "completed within budget", returns. **Healthy.**
+   - Host-side teardown — kthread stops, IRQ teardown, MSI-X mutex frees. No chip touches. **Healthy.**
+   - `rm_shutdown_adapter(sp, nv)` — A7's second wrap. Chip does NOT respond within the 200 ms budget. A7's wrapper times out, sets C5 sink via `rm_cleanup_gpu_lost_state`, returns. **Structural hang.**
+   - Remainder of `nv_shutdown_adapter` (FLR check, NUMA memory queue stop) — completes cleanly on the host side. `nv_pci_remove_helper` returns. rmmod exits with code 0.
+   - The leaked worker (still in flight inside `rm_shutdown_adapter`'s RM closed code) eventually observes the C5 sink and exits. The refcount-2 protocol guarantees no struct leak.
+
+3. **What's wedged in the chip.** Unknown. The MMIO that hangs inside `rm_shutdown_adapter` is RM closed code — we cannot see what register it's writing or what acknowledgement it's waiting for. Plausible candidates include GSP shutdown coordination, memory-allocator teardown that needs a chip ack, or a final state-flush register. None of this matters for A7 — the wrapper bounds the wait and lets teardown continue.
+
+4. **What this proves.**
+   - The 20:52 wedge wasn't an aberration. It was the expected outcome of running rmmod without A7 on this hardware.
+   - Every aorus.<NN> uninstall before A7 landed was a near-miss against the same wedge.
+   - A7 is **load-bearing for production** — not "defense before A9 lands," but the primary mechanism keeping the host alive across routine pod restarts and image upgrades.
+   - The patch intent's "Scenario: rmmod on wedged chip" stays correct, but the patch intent's framing of A7 as F40-precondition-protection is too narrow. A7 protects EVERY rmmod, not just edge-case ones.
+
+5. **What it does NOT prove.**
+   - Whether the rm_shutdown_adapter hang is hardware-specific (TB4 + Blackwell-eGPU + this kernel), driver-specific (open-driver vs proprietary), or workload-history-dependent (CUDA-touched-then-rmmod vs never-touched-then-rmmod). Test A held all these constant.
+   - Whether the chip would respond at 250 ms, 500 ms, or never (the worker is leaked after 200 ms; we don't observe its eventual fate beyond the sink-aware fail-fast that lets it exit).
+   - Whether the close-path caller of `nv_shutdown_adapter` (`nv_stop_device → nv_shutdown_adapter` on LAST-CLOSE without persistence) also exhibits this hang. A7 wraps both callers; only the rmmod caller was tested.
+
+6. **Difference vs the OPEN arm.** The OPEN arm requires F40-precondition (userspace-recovered chip after prior teardown + TB cycle + fix-bar1 + modprobe). The SHUTDOWN arm requires nothing — every healthy rmmod hits it. They share the same wrapper primitive (heap-allocated work, bounded-wait, C5 sink on timeout), the same C5 detector class (`NV_GPU_LOST_DETECTOR_AER_FATAL` as placeholder), and the same "leaked worker exits when MMIO fails-fast post-sink-set" exit mechanism. But they are different in trigger profile.
+
+### Structural close (A6 + A7 — F40b Tier 2 bounded-wait wrapper, OPEN arm + SHUTDOWN arm)
+
+**A6** (committed at `nvidia-driver-injector@c8d3c68`, validated 2026-05-29 evening at n=2 via F40B-TEST) wraps `nv_open_device_for_nvlfp` for E1-classified eGPUs in a bounded-wait pattern:
 
 - Schedule the chip-touching init on `system_long_wq` with a refcounted heap-allocated work struct
 - Syscall thread waits with timeout (`NVreg_TbEgpuOpenTimeoutMs`, default 200 ms = 4× PCIe CTO)
@@ -47,6 +82,16 @@ A6 (committed at `nvidia-driver-injector@c8d3c68`, validated 2026-05-29 evening 
 - On timeout: call `rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL)` (sets C5 sink), return -EIO. Worker is leaked and exits when its in-flight MMIO fails-fast post-sink-set.
 
 A6 makes the structurally clean outcome deterministic instead of timing-dependent. F40B-TEST n=2 confirmed at 201.7 ms and 203.5 ms wall-clock for the timeout, matching the 200 ms budget. Host stays alive; bash receives `Input/output error`; subsequent operations on the GPU see C5 sink-state and fail-fast until the chip is recovered.
+
+**A7** (committed at `nvidia-driver-injector@429615c` as part of the F40b family v1 commit, validated 2026-05-29 evening at n=2 via A7 Test A) wraps `rm_disable_adapter` and `rm_shutdown_adapter` inside `nv_shutdown_adapter` for E1-classified eGPUs in the same bounded-wait pattern A6 uses, generalised to `void (*)(nvidia_stack_t *, nv_state_t *)` callees:
+
+- Each chip-touching RM call (rm_disable_adapter, rm_shutdown_adapter) is wrapped independently — both go through `nv_f40b_shutdown_bounded(rm_call, sp, nv, call_name)`
+- Same `system_long_wq` + refcounted heap-allocated work struct primitive as A6
+- Timeout budget controlled by `NVreg_TbEgpuShutdownTimeoutMs` (default 200 ms; separate knob from the open-path budget)
+- On completion: log "completed within budget", return; nv_shutdown_adapter proceeds with its next teardown step
+- On timeout: set C5 sink via `rm_cleanup_gpu_lost_state`, return; nv_shutdown_adapter proceeds with its next teardown step. Leaked worker exits when its in-flight MMIO fails-fast post-sink-set.
+
+A7 Test A n=2 (21:56:55 wall-clock 200 ms ± measurement granularity, 22:06:35 same) confirmed the timeout fires deterministically on healthy unloads. rm_disable_adapter always completes within budget; rm_shutdown_adapter always times out (on this hardware as of 2026-05-29). Host stays alive across the timeout; the leaked worker exits cleanly; subsequent rmmod completes within ~1 second wall-clock. **Without A7, every rmmod on this hardware would wedge the host** — the 20:52 forensics report attests to exactly this outcome.
 
 ### Operational recovery (current — userspace-orchestrated)
 
@@ -64,18 +109,20 @@ nvidia-smi -pm 1                                (engage persistence — optional
 
 This whole sequence completes in ~17 seconds wall-clock; the host stays alive throughout. No reboot required.
 
-### Future direction (A7 + A8 — fully in-driver target)
+### Future direction (A8 + A9 — fully in-driver target)
 
 The current operational recovery requires userspace coordination (rmmod, TB sysfs, fix-bar1.sh, modprobe). The project target — per `feedback_native_in_driver_hardening` and the Windows TDR reference model — is to move the entire recovery sequence into the driver itself. Two future patches address this:
 
-- **A7 — sysfs observability**: expose `tb_egpu_state`, `tb_egpu_recovery_count`, `tb_egpu_recovery_failures`, `tb_egpu_last_recovery_ns` as per-PCI-device sysfs attributes. Read-only; consumed by monitoring (Prometheus, nvidia-smi, ops dashboards). No event-driven uevent — observability wants state, not transitions.
-- **A8 — in-driver recovery state machine**: on F40b timeout, schedule a recovery worker that performs `pci_reset_bus` → TB rebind via thunderbolt kernel APIs → kernel-side ReBAR resize via `pci_resize_resource()` → re-probe → sink clear → state → healthy. No rmmod/modprobe cycle needed.
+- **A8 — sysfs observability** (committed 2026-05-29 evening at `nvidia-driver-injector@429615c`; **A8 sysfs surface didn't materialise at runtime** despite all symbols loading — A8 used `pci_driver.driver.dev_groups` which compiles but doesn't produce sysfs entries on this driver. A8 v2 will switch to A3's `sysfs_create_group` pattern). Expose `tb_egpu_state`, `tb_egpu_f40b_fires`, `tb_egpu_recovery_count`, `tb_egpu_recovery_failures`, `tb_egpu_last_recovery_ns` as per-PCI-device sysfs attributes. Read-only; consumed by monitoring (Prometheus, nvidia-smi, ops dashboards). No event-driven uevent — observability wants state, not transitions.
+- **A9 — in-driver recovery state machine** (draft only; promotion gated on A8 v2 landing). On F40b timeout (OPEN or SHUTDOWN arm), schedule a recovery worker that performs `pci_reset_bus` → TB rebind via thunderbolt kernel APIs → kernel-side ReBAR resize via `pci_resize_resource()` → re-probe → sink clear → state → healthy. No rmmod/modprobe cycle needed.
 
-After A7+A8, the F40 wedge becomes a transient event: detection → fail-fast (EIO) → in-driver recovery (~5-10 sec) → GPU back to healthy. The injector's userspace orchestration role disappears.
+After A8+A9, the F40 wedge becomes a transient event: detection → fail-fast (EIO) → in-driver recovery (~5-10 sec) → GPU back to healthy. The injector's userspace orchestration role disappears.
 
-Design context for the target state lives in `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/in-driver-recovery-target-2026-05-29.md`. A8 patch intent lives in `nvidia-driver-injector/docs/patch-intents/A8-f40b-in-driver-recovery.md`.
+Design context for the target state lives in `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/in-driver-recovery-target-2026-05-29.md`. A9 patch draft lives in `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A9-patch-intent-draft-2026-05-29.md` (graduates to `docs/patch-intents/A9-f40b-in-driver-recovery.md` when implementation begins).
 
-### Minimum-viable reproduction recipe (current as of 2026-05-29 evening)
+### Minimum-viable reproduction recipes (current as of 2026-05-29 evening)
+
+**OPEN arm (F40-open) — requires F40-precondition state**
 
 ```
 1. Cold boot
@@ -91,17 +138,36 @@ Design context for the target state lives in `nvidia-driver-injector/docs/missio
 11. nvidia-smi -L                                    ← cycle 1, completes cleanly
 12. exec 3</dev/nvidia0                              ← cycle 2
     Expected without F40b: host wedge (kernel-wide freeze, hard reboot required)
-    Expected WITH F40b (current code): -EIO after ~200 ms, "Input/output error", host alive
-    Expected WITH A8 (future): -EIO momentarily, in-driver recovery, retry succeeds within ~5 sec
+    Expected WITH A6 (current code): -EIO after ~200 ms, "Input/output error", host alive
+    Expected WITH A9 (future): -EIO momentarily, in-driver recovery, retry succeeds within ~5 sec
 ```
+
+**SHUTDOWN arm (F40-shutdown) — requires NO precondition**
+
+```
+1. Cold boot
+2. Deploy injector DS → nvidia.ko bound + persistence engaged
+3. (optionally) run any healthy workload
+4. kubectl exec <injector-pod> -- /entrypoint.sh uninstall
+    Expected without A7: rmmod hangs indefinitely inside rm_shutdown_adapter; host wedge during subsequent kernel work; hard reboot required (the 20:52 forensics outcome)
+    Expected WITH A7 (current code): rm_disable_adapter "completed within budget"; rm_shutdown_adapter "timed out after 200 ms — declaring GPU lost"; rmmod returns 0 within ~1 sec; host alive; chip reloadable on next modprobe
+    Expected WITH A9 (future): rm_shutdown_adapter timeout triggers in-driver recovery; chip back to healthy within ~5-10 sec; no rmmod/modprobe cycle needed
+```
+
+The SHUTDOWN arm recipe is **trivially reproducible on any healthy aorus.<NN> deployment** — there's no F40-precondition setup. Just uninstall a healthy driver and observe `journalctl -k -f`. A7 Test A n=2 (21:56:55 and 22:06:35) used exactly this recipe.
 
 ### Cross-references
 
 - F40b structural close design: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/F40b-structural-fix-2026-05-29.md`
-- F40b implementation (A6): `nvidia-driver-injector/patches/addon/A6-f40b-bounded-wait-open.patch`
+- F40b OPEN-arm implementation (A6): `nvidia-driver-injector/patches/addon/A6-f40b-bounded-wait-open.patch`
+- F40b OPEN-arm patch intent: `nvidia-driver-injector/docs/patch-intents/A6-f40b-bounded-wait-open.md`
+- F40b SHUTDOWN-arm implementation (A7): `nvidia-driver-injector/patches/addon/A7-f40b-bounded-wait-shutdown.patch`
+- F40b SHUTDOWN-arm patch intent: `nvidia-driver-injector/docs/patch-intents/A7-f40b-bounded-wait-shutdown.md`
+- A7 Test A n=2 validation report: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A7-test-A-validation-2026-05-29.md`
+- A8 sysfs observability patch (currently broken — A8 v2 forthcoming): `nvidia-driver-injector/patches/addon/A8-f40b-sysfs-observability.patch` + intent at `nvidia-driver-injector/docs/patch-intents/A8-f40b-sysfs-observability.md`
 - In-driver recovery target design: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/in-driver-recovery-target-2026-05-29.md`
-- A8 patch intent draft: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A8-patch-intent-draft-2026-05-29.md` (will graduate to `docs/patch-intents/A8-f40b-in-driver-recovery.md` when implementation begins)
-- A7 sysfs observability patch intent: `nvidia-driver-injector/docs/patch-intents/A7-f40b-sysfs-observability.md` (forthcoming — paired with the A7 implementation we tackle next)
+- A9 patch intent draft: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A9-patch-intent-draft-2026-05-29.md` (will graduate to `docs/patch-intents/A9-f40b-in-driver-recovery.md` when implementation begins)
+- 20:52 SHUTDOWN-arm forensics report: `/var/log/mission-1-archaeology/a7-deploy-wedge-2026-05-29/FORENSICS-REPORT.md`
 - F41 (upstream root-cause sibling — chip ReBAR Control register reset on TB hot-add): `F41-...md`
 
 ---
