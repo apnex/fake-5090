@@ -34,6 +34,45 @@ The 2026-05-29 evening Test #1 (2x `nvidia-smi -L` cycle with bpftrace + post-mo
 
 All four reproductions are consistent with the corrected mechanism. Earlier "runtime PM" / "deferred RCU" / "kworker chip touch" candidate mechanisms are no longer needed to explain the data.
 
+### Precondition refinement (Test #1 REDO, 2026-05-29 evening)
+
+A second-attempt reproduction (Test #1 REDO at 12:09–12:10 UTC+10, on a fresh boot) ran the SAME minimum-viable-trigger procedure (TB deauth/reauth → fix-bar1 → modprobe → 2x nvidia-smi -L) but **did NOT wedge**. Five cycles of `nvidia-smi -L` (4 with bpftrace running, 1 with bpftrace killed for native-speed control) all completed cleanly with paired `nv_open_device` / `nv_stop_device` / `nv_shutdown_adapter` ENTER/RETURN events. Shutdown took ~620–638 ms per cycle, consistent across cycles.
+
+**Key kernel-side difference:** the divergent-state signature `gpuHandleSanityCheckRegReadError_GH100: addr: 0x110094, regvalue: 0xbadf2100` **was NOT emitted** during the REDO. In all four prior wedge reproductions (yesterday cycle 2; PINPOINT-1 morning; C1 morning; Test #1 morning) the sentinel WAS emitted. The chip was NOT in the F40-triggering state.
+
+**The procedural difference between the REDO boot and the four wedge boots:**
+
+- **Wedge boots:** earlier in the same boot, the chip had been through one full production cycle — injector DS deployed, persistence engaged via `nvidia-smi -pm 1`, nvbandwidth CUDA workload run, then uninstall via `entrypoint.sh uninstall` (which rmmods nvidia + nvidia_uvm). THEN the test cycle started (TB recycle → fix-bar1 → modprobe → 2x nvidia-smi -L).
+- **REDO boot:** post-boot, no injector DS deployment, no persistence engagement, no CUDA workload. The test cycle ran directly against a chip that had only ever seen its BIOS-time cold-plug and now its first TB recycle.
+
+**Updated F40 precondition stack (n=4 wedge + n=1 no-wedge):**
+
+1. Prior probe + persistence-engagement + CUDA workload (or equivalent chip-touching activity that engages GSP) **in the same boot**.
+2. Then a destructive uninstall path that rmmods nvidia and runs `nv_pci_remove_helper` → `nv_shutdown_adapter`.
+3. Then a TB deauth/reauth → broken-BAR1 (F41 fires).
+4. Then `fix-bar1.sh` userspace recovery (recovers BAR1 sizing; does NOT clear chip-internal divergence).
+5. Then modprobe nvidia without persistence engagement.
+6. Then a first OPEN → MMIO → LAST-CLOSE cycle (close-path is safe; the gating signature `0x110094 == 0xbadf2100` becomes observable at the first MMIO).
+7. Then a SECOND OPEN → wedge in `RmInitAdapter`.
+
+Remove step (1) or (2) and the chip is not in the divergent state — `0x110094` reads a normal value, no wedge fires. **TB recycle + fix-bar1 alone is not sufficient.** The chip needs prior persistence/CUDA-bound activity that left chip-internal init state pointed at a sub-state where the post-recovery re-init hangs.
+
+**The `0x110094 == 0xbadf2100` sentinel is therefore the canonical precondition canary.** It is necessary AND sufficient (per n=4 + n=1 evidence so far) as a probe-time predictor of the wedge.
+
+**For F40b Tier 1 (probe-time poison flag): this strengthens the design's confidence.** The signature isn't just a candidate canary — it is the failure mode's gating signal. Read `0x110094` at probe time; if it returns the sentinel, the chip is in the F40-triggering state and the poison flag must be set; if it reads normally, the chip is safe and the flag should not be set. Variant A (refuse all re-init when flagged) is the right default. The detector has high signal-to-noise.
+
+**For the fake-5090 substrate spec:** the substrate's "chip init state" parameter has at least three values now, not two:
+
+- `cold-boot-equivalent` — fresh BIOS-POST state, no prior driver activity. `0x110094` reads normally. No wedge from any subsequent close+open cycle.
+- `userspace-recovered-fresh` — chip went through TB recycle + fix-bar1 BUT was not bound to nvidia.ko + persistence-engaged earlier in this lifetime. `0x110094` reads normally. **The previously-conjectured F40 precondition state is NOT this; this state is safe.** Test #1 REDO is the n=1 evidence point.
+- `userspace-recovered-after-prior-bind` — chip went through nvidia.ko probe + persistence + CUDA workload + destructive uninstall, then TB recycle + fix-bar1. `0x110094` reads as `0xbadf2100`. This is the actual F40 state. n=4 evidence.
+
+The substrate's `0x110094` read MUST return `0xbadf2100` for the wedge to fire; the wedge MUST NOT fire if it reads normally. This is empirically tight.
+
+### Outstanding to-do: validate full reproduction with reading the canary at every state
+
+A confirmation run is queued: deploy injector → engage persistence → run nvbandwidth → uninstall → TB recycle → fix-bar1 → BEFORE modprobe, dump BAR0+0x110094 → modprobe → during cycle 1, observe `gpuHandleSanityCheck` warning OR explicitly read 0x110094 → 2x nvidia-smi -L → expect wedge on cycle 2. This run validates the precondition stack end-to-end and provides one more data point on the sentinel-signature reliability. Reboot cost: 1 (the wedge will fire).
+
 ### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
 
 The F40b structural fix design at `nvidia-driver-injector/docs/missions/.../design/F40b-structural-fix-2026-05-29.md` needs to re-cut the wrap site:
