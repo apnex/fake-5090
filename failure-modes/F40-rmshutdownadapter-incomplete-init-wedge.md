@@ -1,11 +1,114 @@
-# F40 — `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state
+# F40 — chip re-init wedge on userspace-recovered eGPU (PCIe Completion Timeout race)
+
+> **Note on the title.** The original "`RmShutdownAdapter` destructive-teardown wedge" framing was disproved by the 2026-05-29 investigation — see §Current understanding below. The wedge is in the chip re-init MMIO path that runs on the FIRST OPEN AFTER a clean LAST-CLOSE, not in `RmShutdownAdapter` itself. The title is preserved for traceability; the body has been refreshed and the historical investigation log (all the falsified hypotheses, layered theories, and intermediate findings) is preserved at the bottom of this document.
 
 | Field | Value |
 |---|---|
-| **Sources** | C5 (close-path coverage scope boundary — surfaced by this case); A4 (close-path telemetry — the four-site instrumentation that bounded the wedge to a post-`close-exit` region) |
-| **Confidence** | field-bug (confirmed **n=4**, see Reproducibility section). Re-cuts and corrections to original framing tracked in §"Mechanism (revised 2026-05-29 evening — wedge is in RE-INIT, not in teardown)" below — most important: the entry's TITLE is preserved for historical traceability but is now a misnomer. The wedge fires on the FIRST OPEN AFTER a clean LAST-CLOSE, not in `RmShutdownAdapter` itself. |
-| **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/`. **PINPOINT-1 instrumented re-test 2026-05-29 09:13–09:19 UTC+10 reproduced the wedge with full telemetry** — forensic archive `/var/log/mission-1-archaeology/pinpoint1-wedge-2026-05-29/`. |
-| **fake-5090 mechanism** | Hybrid substrate state — chip responds normally to passive MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads) AND GSP firmware loads OK at probe AND nominal close-path telemetry succeeds — but the chip's PCIe equalization and LTR state are divergent from cold-boot (Phy16Sta `EquComplete-`, LTR latencies = 0, lane-equalization presets in transient state). Substrate honours all driver work UP TO `nv_shutdown_adapter`/post-shutdown telemetry; from there forward, one of `gpuStateDestroy` / `RmTeardownDeviceDma` / `RmTeardownRegisters` performs chip-touching operations that depend on the missing init state and silently hangs. No Xid, no AER, no sentinel return — the wedge is in-step inside a teardown function call that never returns. |
+| **Sources** | C5 (sink primitive used by F40b's timeout path); A4 (close-path telemetry that bounded the investigation); A6 (the F40b Tier 2 bounded-wait wrapper that structurally closes the wedge) |
+| **Confidence** | field-bug (n=13+ wedge reproductions during 2026-05-29 investigation); structurally closed via A6 at n=2 validation (F40B-TEST runs 19:48 and 19:50, 2026-05-29) |
+| **Predecessor evidence** | injector repo `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md`; forensic archives `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/` through `/var/log/mission-1-archaeology/tbv2n2-wedge-2026-05-29/` (13 wedge boots) |
+| **fake-5090 mechanism** | Substrate models a chip in *userspace-recovered-after-prior-bind* init state. Chip responds normally to PASSIVE MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads). Chip does NOT respond to the chip-init MMIO TLP that `RmInitAdapter` issues during `nv_open_device_for_nvlfp` on the second open of a fresh fd cycle. PCIe Completion Timeout fires on the root complex; AER signaling MAY race against a kernel-wide deadlock from the blocked MMIO read. Without the F40b Tier 2 wrapper, the deadlock wins frequently and the host hangs hard. |
+
+## Current understanding (2026-05-29 evening — supersedes investigation log below)
+
+### Mechanism (PINNED — n=13 reproductions, Test B v2 directly observed AER UESta=0x00004000)
+
+1. **Precondition.** The chip enters a *userspace-recovered-after-prior-bind* substrate state when the boot cycle has been:
+   - Prior nvidia.ko bind + persistence engagement + CUDA workload (or equivalent chip-touching activity that engages GSP), then
+   - Destructive uninstall via `nv_pci_remove_helper → nv_shutdown_adapter`, then
+   - TB deauth/reauth → broken-BAR1 (F41 fires), then
+   - `fix-bar1.sh` userspace recovery (restores BAR1 sizing but NOT chip-internal init invariants), then
+   - modprobe nvidia (without persistence engagement).
+
+2. **Cycle 1 (first nvidia-smi -L or equivalent).** Open → MMIO → LAST-CLOSE. Close-path runs cleanly through `nv_shutdown_adapter` → WPR2 → 0. The chip remains MMIO-responsive (BAR0 reads continue to work for ≥30 sec; see BAR-test forensics).
+
+3. **Cycle 2 (the wedge trigger).** Any chip-touching open of `/dev/nvidia0` after cycle 1's LAST-CLOSE:
+   - Goes through VFS / chrdev / `nvidia_open` → foreground branch → `nv_open_device_for_nvlfp` → `RmInitAdapter`
+   - `RmInitAdapter` issues an MMIO TLP to a chip register (a GSP boot / init register)
+   - The chip does not produce a PCIe Completion for that TLP
+   - The CPU executing the MMIO read is blocked
+   - PCIe Completion Timeout (50 ms default at root complex) eventually fires
+   - The AER state machine SHOULD signal `Uncorrectable (Non-Fatal) Completion Timeout` (UESta=0x00004000, bit 14)
+   - The kernel SHOULD invoke C5's `pci_error_handlers.error_detected` callback, set sink-state, return ERROR_RECOVERY, and the MMIO read returns 0xFFFFFFFF for the driver to handle
+
+4. **The race that determines outcome.** AER must complete before the kernel deadlocks on the blocked CPU:
+   - **Path A (won by AER):** AER fires in time, C5 catches it, sink-set, EIO returned to userspace. Host stays alive. Observed n=1 of 12 attempts (Test B v2; bpftrace's heavy kprobe overhead provided the scheduling slack).
+   - **Path B (won by deadlock):** the CPU is stuck waiting for MMIO completion AND holding kernel state that AER processing needs. Cascading deadlock locks up the whole kernel before AER can fire. Observed n=11 of 12 attempts (DIFF-3, DIFF-4, VERIFY, TBv2-n2, and the earlier reproductions). Host hard-wedges; reboot required.
+
+5. **The chip-side root cause is OUT-OF-SCOPE for this catalog.** The chip not responding to RmInitAdapter's MMIO on a userspace-recovered substrate IS the underlying defect. We do not have visibility into the chip's silicon/firmware state; this is NVIDIA's territory (or future kernel-side TB-aware patches). What we DO control is the host-side response to the chip's misbehaviour.
+
+### Structural close (A6 — F40b Tier 2 bounded-wait wrapper)
+
+A6 (committed at `nvidia-driver-injector@c8d3c68`, validated 2026-05-29 evening at n=2) wraps `nv_open_device_for_nvlfp` for E1-classified eGPUs in a bounded-wait pattern:
+
+- Schedule the chip-touching init on `system_long_wq` with a refcounted heap-allocated work struct
+- Syscall thread waits with timeout (`NVreg_TbEgpuOpenTimeoutMs`, default 200 ms = 4× PCIe CTO)
+- On completion within timeout: propagate the worker's rc (happy path)
+- On timeout: call `rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL)` (sets C5 sink), return -EIO. Worker is leaked and exits when its in-flight MMIO fails-fast post-sink-set.
+
+A6 makes the structurally clean outcome deterministic instead of timing-dependent. F40B-TEST n=2 confirmed at 201.7 ms and 203.5 ms wall-clock for the timeout, matching the 200 ms budget. Host stays alive; bash receives `Input/output error`; subsequent operations on the GPU see C5 sink-state and fail-fast until the chip is recovered.
+
+### Operational recovery (current — userspace-orchestrated)
+
+Once F40b fires, the chip is in C5 sink-set state and unusable. Recovery requires the chip's PCIe / init state to be reset. The current sequence (validated by F40B-TEST 1 → F40B-TEST 2 between-run recovery + the explicit runtime reset test at 20:02) is:
+
+```
+rmmod nvidia                                    (cleanly unloads — C5 sink → chip-touching teardown skipped)
+echo 0 > /sys/bus/thunderbolt/.../authorized    (TB deauth)
+echo 1 > /sys/bus/thunderbolt/.../authorized    (TB reauth — chip re-enumerates with broken-BAR1)
+setpci -s 04:00.0 COMMAND=0:3                   (clear mem decoding for fix-bar1's safety check)
+fix-bar1.sh                                     (write ReBAR CTRL=0x00000f21, pciehp slot cycle)
+modprobe --ignore-install nvidia                (loads F40b nvidia.ko, binds)
+nvidia-smi -pm 1                                (engage persistence — optional)
+```
+
+This whole sequence completes in ~17 seconds wall-clock; the host stays alive throughout. No reboot required.
+
+### Future direction (A7 + A8 — fully in-driver target)
+
+The current operational recovery requires userspace coordination (rmmod, TB sysfs, fix-bar1.sh, modprobe). The project target — per `feedback_native_in_driver_hardening` and the Windows TDR reference model — is to move the entire recovery sequence into the driver itself. Two future patches address this:
+
+- **A7 — sysfs observability**: expose `tb_egpu_state`, `tb_egpu_recovery_count`, `tb_egpu_recovery_failures`, `tb_egpu_last_recovery_ns` as per-PCI-device sysfs attributes. Read-only; consumed by monitoring (Prometheus, nvidia-smi, ops dashboards). No event-driven uevent — observability wants state, not transitions.
+- **A8 — in-driver recovery state machine**: on F40b timeout, schedule a recovery worker that performs `pci_reset_bus` → TB rebind via thunderbolt kernel APIs → kernel-side ReBAR resize via `pci_resize_resource()` → re-probe → sink clear → state → healthy. No rmmod/modprobe cycle needed.
+
+After A7+A8, the F40 wedge becomes a transient event: detection → fail-fast (EIO) → in-driver recovery (~5-10 sec) → GPU back to healthy. The injector's userspace orchestration role disappears.
+
+Design context for the target state lives in `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/in-driver-recovery-target-2026-05-29.md`. A8 patch intent lives in `nvidia-driver-injector/docs/patch-intents/A8-f40b-in-driver-recovery.md`.
+
+### Minimum-viable reproduction recipe (current as of 2026-05-29 evening)
+
+```
+1. Cold boot
+2. Deploy injector DS → nvidia.ko bound + persistence engaged
+3. Run nvbandwidth via diag container (any CUDA workload sufficient)
+4. Uninstall via injector + delete DS (rmmod nvidia + nvidia_uvm)
+5. echo 0 > /sys/bus/thunderbolt/devices/0-1/authorized; sleep 2
+6. echo 1 > /sys/bus/thunderbolt/devices/0-1/authorized; sleep 4
+7. setpci -s 04:00.0 COMMAND=0:3
+8. /root/nvidia-driver-injector/tools/fix-bar1.sh
+9. echo > /sys/bus/pci/devices/0000:04:00.0/driver_override
+10. modprobe --ignore-install nvidia
+11. nvidia-smi -L                                    ← cycle 1, completes cleanly
+12. exec 3</dev/nvidia0                              ← cycle 2
+    Expected without F40b: host wedge (kernel-wide freeze, hard reboot required)
+    Expected WITH F40b (current code): -EIO after ~200 ms, "Input/output error", host alive
+    Expected WITH A8 (future): -EIO momentarily, in-driver recovery, retry succeeds within ~5 sec
+```
+
+### Cross-references
+
+- F40b structural close design: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/F40b-structural-fix-2026-05-29.md`
+- F40b implementation (A6): `nvidia-driver-injector/patches/addon/A6-f40b-bounded-wait-open.patch`
+- In-driver recovery target design: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/in-driver-recovery-target-2026-05-29.md`
+- A8 patch intent draft: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/A8-patch-intent-draft-2026-05-29.md` (will graduate to `docs/patch-intents/A8-f40b-in-driver-recovery.md` when implementation begins)
+- A7 sysfs observability patch intent: `nvidia-driver-injector/docs/patch-intents/A7-f40b-sysfs-observability.md` (forthcoming — paired with the A7 implementation we tackle next)
+- F41 (upstream root-cause sibling — chip ReBAR Control register reset on TB hot-add): `F41-...md`
+
+---
+
+# Historical investigation log (preserved 2026-05-29 evening — superseded by §Current understanding above)
+
+The sections below preserve the day-of-investigation reasoning in chronological order. Multiple hypotheses were proposed and falsified before the mechanism was pinned. Reading them top-to-bottom recovers the intellectual path; reading just the §Current understanding above recovers the result.
 
 ## Mechanism (revised 2026-05-29 evening — wedge is in RE-INIT, not in teardown)
 
