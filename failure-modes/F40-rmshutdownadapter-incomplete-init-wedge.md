@@ -73,6 +73,20 @@ The substrate's `0x110094` read MUST return `0xbadf2100` for the wedge to fire; 
 
 A confirmation run is queued: deploy injector → engage persistence → run nvbandwidth → uninstall → TB recycle → fix-bar1 → BEFORE modprobe, dump BAR0+0x110094 → modprobe → during cycle 1, observe `gpuHandleSanityCheck` warning OR explicitly read 0x110094 → 2x nvidia-smi -L → expect wedge on cycle 2. This run validates the precondition stack end-to-end and provides one more data point on the sentinel-signature reliability. Reboot cost: 1 (the wedge will fire).
 
+### Test #1 FULLPRE result (2026-05-29 evening — partial falsification)
+
+The full-precondition reproduction ran and wedged on cycle 2 as predicted (**n=5 wedge confirmed**, plus the n=1 no-wedge from Test #1 REDO without prior persistence). The precondition stack as documented above (steps 1–7) IS empirically necessary.
+
+**BUT — two prior claims in this section are now partially falsified:**
+
+1. **The `0x110094 == 0xbadf2100` sentinel is NOT necessary.** This run wedged without emitting the sentinel anywhere in the wedge boot's kernel journal. The earlier "necessary AND sufficient" framing is retracted. Updated assessment: the sentinel correlates with the wedge (n=4 of 5) but does NOT gate it. As a single-register canary for an F40b probe-time poison flag, it would catch most wedges but miss this one. See `feedback_single_datapoint_inferential_overreach_2026_05_26` — the missing cell (sentinel-absent-with-wedge) was exactly what we hadn't tested before claiming sufficiency, and today's run produced it.
+
+2. **The wedge is NOT in `nv_open_device` / `RmInitAdapter`.** bpftrace (post-modprobe attach, 8 traceable kprobes attached) captured cycle 1 completely — 5 ENTER / 5 RETURN matched, including `nv_shutdown_adapter` at LAST-CLOSE — and captured **ZERO** cycle 2 events. The wedge fired before `nv_open_device` was ever called. The wedge site is in the syscall path BEFORE `nvidia_open` queues work to `nv_open_q`.
+
+**New leading hypothesis: PCI runtime-PM resume.** The gap between cycle 1 RETURN (12:20:18) and cycle 2 start (12:21:16) was 58 seconds — longer than Linux's default 5-sec auto-suspend window. The GPU likely auto-suspended to D3hot during the idle. Cycle 2's `open()` syscall would trigger `pci_pm_runtime_resume` BEFORE any nvidia.ko file_operations callback runs. On a chip whose D3→D0 PCIe link retrain / GSP-state restoration can't complete from the userspace-recovered state, that resume hangs synchronously in the PM core. This is testable with a single differential experiment: re-run the precondition sequence with `power/control=on` on the GPU + audio function before cycle 1. If 5 cycles survive, runtime-PM resume is the site.
+
+Forensics: `/var/log/mission-1-archaeology/c1-test1-fullpre-wedge-2026-05-29/FORENSICS-REPORT.md`.
+
 ### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
 
 The F40b structural fix design at `nvidia-driver-injector/docs/missions/.../design/F40b-structural-fix-2026-05-29.md` needs to re-cut the wrap site:
