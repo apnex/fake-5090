@@ -137,13 +137,39 @@ The wedge fires somewhere AFTER `nvidia_close_callback` returns. Candidates:
 
 The 5-min-41s delay between close completion and user-visible wedge strongly suggests **deferred work scheduled by close-path**, not an immediate hang.
 
-### Falsification + further-narrowing experiments queued
+### Falsification experiments — runtime PM hypothesis is PARTIALLY confirmed but INSUFFICIENT
 
-- **Disable runtime PM on the device** (`echo on > /sys/bus/pci/devices/0000:04:00.0/power/control`) before the wedge cycle. If wedge prevented: runtime-PM hypothesis confirmed.
-- **bpftrace** attached to `pm_runtime_work` / `pci_pm_runtime_*` / `workqueue:workqueue_execute_*` during the wedge window. Last function entered without exit identifies the kernel-side wedge site.
-- **PINPOINT-2** with markers inside `nv_shutdown_adapter` (between `rm_disable_adapter` / `nv_kthread_q_stop` / `free_irq` / `rm_shutdown_adapter`) to verify each synchronous step actually completes (cross-check against the implicit assumption that A4's `post-shutdown` log implies all of nv_shutdown_adapter completed).
+Three diagnostics rode one reboot cycle 2026-05-29 09:13–09:58. Results:
 
-These three diagnostics can ride one reboot cycle. The persistence-mode mitigation remains the empirically valid production answer (n=2) — the catalog confidence is now restored to field-bug.
+**Run 1 — PINPOINT-2 + bpftrace + `power/control=on` (runtime-PM-disable)**
+
+Sequence: cold-plug → TB deauth/reauth → fix-bar1.sh (no --bind) → set `power/control=on` on 04:00.0 + 04:00.1 → modprobe nvidia → nvidia-smi -L → wait.
+
+Result: **Host alive at 6m 30s after `nvidia-smi -L` returned.** Kernel printk responsive throughout. All A4 + PINPOINT-1 + PINPOINT-2 markers fired through `callback-exit` and `exit`. bpftrace counts:
+- pci_pm_runtime_suspend: **0 calls** (runtime PM correctly disabled)
+- pm_runtime_work: 164 cycles, all matched ENTER/RETURN
+- No nvidia.ko deferred work captured
+
+This is suggestive but **not conclusive** evidence for the runtime-PM-suspend hypothesis. Yesterday's wedge fired at 5m 41s; our 6m 30s observation barely cleared that threshold. We cannot rule out that the wedge would have fired had we waited longer.
+
+**Run 2 — restore-attempt wedge (same boot, ~30 min later)**
+
+Sequence: after Run 1's observation window, restore production state: `echo > unbind` GPU + `rmmod nvidia_uvm` (already gone) + `rmmod nvidia` + apply DSes with production aorus.17 image. **The host wedged silently 5+ minutes into this sequence.** Forensics: kernel printk went silent between my `rmmod nvidia` (~09:59) and the eventual "nvidia-nvlink: Unregistered Nvlink Core" message at 10:04:46 (5+ min gap). Reboot required.
+
+Implications:
+1. `power/control=on` does NOT prevent the wedge on the `unbind`/`rmmod` code path. The rmmod path goes through `nv_pci_remove_helper → nv_shutdown_adapter` directly, bypassing the `nv_stop_device` persistence check AND apparently the runtime-PM-disable mitigation.
+2. The runtime PM hypothesis is at best PARTIAL. Either runtime PM is one of multiple async wedge mechanisms, or the actual mechanism is something `power/control=on` happens to slow down without preventing.
+3. The "Run 1 host survived 6m+" result alone is not strong evidence — the restore wedge in Run 2 (same boot, same chip state lineage) demonstrates that the wedge can fire and that no sysfs-level intervention we've tried fully prevents it.
+
+**Production mitigation remains persistence engagement (n=3).** Confirmed across cycle-1 healthy use (2026-05-28 evening), cycle-2 wedge-recovery + bind (2026-05-28), today's cold-boot injector startup (2026-05-29), and today's post-restore re-bind. Persistence works because it routes the `nv_stop_device` close-path through `rm_disable_adapter` (lighter teardown, no destructive RmShutdownAdapter call). The unbind/rmmod path that wedged in Run 2 is NOT taken in normal production flow — production uses the injector's `uninstall` subcommand or just leaves the driver loaded.
+
+### Open questions
+
+- **Why did Run 1 survive but Run 2 wedge** under similar chip-state conditions (both with chip in userspace-recovered state)? Hypothesis: cumulative state from multiple destructive teardowns weakens the chip's response capacity; or the unbind path's specific code differs from the LAST-CLOSE path's specific code in a wedge-relevant way.
+- **What kernel-side function actually hangs?** bpftrace was attached during Run 1 (survived) but not during Run 2 (wedged). Need to instrument Run 2's pattern specifically.
+- **Why no SHUTDOWN markers fired during Run 2's rmmod?** Either the rmmod path doesn't go through nv_shutdown_adapter (contradicting the source code), OR printk was already wedged when nv_shutdown_adapter ran. The latter would mean the wedge is BEFORE nv_shutdown_adapter on the rmmod path — a different code site than the LAST-CLOSE path.
+
+Catalog confidence remains field-bug n=3 (yesterday cycle 2; this morning Run 1's apparent survival was a false negative; this morning Run 2's restore attempt). The wedge mechanism is still partially unknown.
 
 ## fake-5090 mechanism mapping
 
