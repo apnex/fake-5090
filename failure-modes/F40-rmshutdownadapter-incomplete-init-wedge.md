@@ -87,9 +87,11 @@ The full-precondition reproduction ran and wedged on cycle 2 as predicted (**n=5
 
 Forensics: `/var/log/mission-1-archaeology/c1-test1-fullpre-wedge-2026-05-29/FORENSICS-REPORT.md`.
 
-### BREAKTHROUGH (2026-05-29 evening, Test B v2 + VERIFY)
+### Mechanism pinned, but AER+C5 path is NOT reliable (2026-05-29 evening, Test B v2 + VERIFY + TBv2-n2)
 
-**The F40 wedge mechanism is a PCIe Completion Timeout AER race during chip re-init MMIO.** Two adjacent runs proved this:
+**The F40 wedge mechanism IS a PCIe Completion Timeout AER race during chip re-init MMIO** — confirmed by Test B v2's direct observation of `UESta=0x00004000` (CTO bit) and the C5 state machine output. But this race is genuinely non-deterministic and the AER+C5 path catches the failure only intermittently. n=2 reproducibility check (TBv2-n2) wedged with identical setup as Test B v2's EIO.
+
+**Three adjacent runs investigated this:**
 
 **Test B v2 (cycle 1 + cycle 2 + bpftrace running with 47 probes)** — cycle 2 reached `nvidia_open`'s `foreground-pre-init`, called `nv_open_device_for_nvlfp`, issued MMIO to the chip. ~1 second later, kernel reported:
 
@@ -118,9 +120,23 @@ C5 caught the AER, set sink-state, returned -EIO. Host stayed alive. Bash got `I
    - bpftrace running (47 kprobes in the path): kprobe overhead provides scheduling slack. AER handler runs in time. C5 catches, returns -EIO.
    - no bpftrace: MMIO blocking + scheduler critical sections + lock acquisition order races deadlock the kernel before AER handler can run. Host wedges.
 
-**Implications for fix path**: now firmly established as F40b Tier 2 in the design doc — bounded-wait wrapper around `nv_open_device_for_nvlfp` so the MMIO has a timeout that exceeds 50 ms CTO. On timeout: `pci_dev_set_disconnected` + C5 sink-set + return -EIO. The behavior we want is what Test B v2 produced; we just need to engineer it deterministically instead of relying on bpftrace-induced timing.
+**TBv2-n2 (cycle 1 + cycle 2 + IDENTICAL 47 bpftrace probes as Test B v2)** — same setup as Test B v2, intended as the n=2 reproducibility check. Outcome: WEDGE. No PINPOINT-3 markers fired for cycle 2; no AER message; no C5 recovery output. Same wedge pattern as VERIFY. Test B v2's EIO was thus n=1 of 2 attempts — NOT a reliable structural outcome.
 
-Forensics: `/var/log/mission-1-archaeology/verify-wedge-2026-05-29/FORENSICS-REPORT.md` (this run), `/var/log/mission-1-archaeology/diff3-wedge-2026-05-29/FORENSICS-REPORT.md` and onward (preceding investigation).
+**Cumulative result:**
+
+| Test | Outcome |
+|---|---|
+| Test B v2 (47 probes) | -EIO via AER+C5 (n=1 outlier) |
+| VERIFY (no bpftrace) | wedge |
+| TBv2-n2 (47 probes — repro of Test B v2) | wedge |
+
+n=2 of 3 wedge, n=1 of 3 -EIO. The mechanism is the same race in all three; the kernel-side resolution varies.
+
+**Implications for fix path**: C5's AER recovery infrastructure IS correct in design (Test B v2 proved it can handle the failure cleanly). But AER processing doesn't always fire in time before the kernel deadlocks. The structural fix is therefore F40b Tier 2 — a bounded-wait wrapper around `nv_open_device_for_nvlfp` that forces a deterministic timeout. The bounded-wait wrapper produces the same end-state (sink-set + EIO) regardless of whether AER fires naturally, decoupling the fix from the race timing.
+
+Test B v2 is **evidence the C5 machinery works when given the chance**; it is **not evidence that AER fires reliably enough to give it the chance.**
+
+Forensics: `/var/log/mission-1-archaeology/verify-wedge-2026-05-29/FORENSICS-REPORT.md`, `/var/log/mission-1-archaeology/tbv2n2-wedge-2026-05-29/FORENSICS-REPORT.md` (this round); `/var/log/mission-1-archaeology/diff3-wedge-2026-05-29/FORENSICS-REPORT.md` and onward (preceding investigation).
 
 ### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
 
