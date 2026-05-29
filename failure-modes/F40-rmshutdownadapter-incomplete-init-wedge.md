@@ -3,11 +3,76 @@
 | Field | Value |
 |---|---|
 | **Sources** | C5 (close-path coverage scope boundary — surfaced by this case); A4 (close-path telemetry — the four-site instrumentation that bounded the wedge to a post-`close-exit` region) |
-| **Confidence** | field-bug (confirmed n=2 — see Reproducibility section. Initial 2026-05-29 morning downgrade to "hypothesis" was retracted later same day on careful re-read of the prior-boot journal: the PINPOINT-1 re-test DID wedge — kernel printk went silent at 09:14:01 immediately after the last marker but bash/systemd kept running for ~5 min until something downstream needed the wedged subsystem. The "did not wedge" interpretation was wrong.) |
+| **Confidence** | field-bug (confirmed **n=4**, see Reproducibility section). Re-cuts and corrections to original framing tracked in §"Mechanism (revised 2026-05-29 evening — wedge is in RE-INIT, not in teardown)" below — most important: the entry's TITLE is preserved for historical traceability but is now a misnomer. The wedge fires on the FIRST OPEN AFTER a clean LAST-CLOSE, not in `RmShutdownAdapter` itself. |
 | **Predecessor evidence** | nvidia-driver-injector `docs/missions/mission-1-egpu-hot-plug-hot-power/experiments/h1-userspace-recovery-2026-05-28.md` (cycle 2 wedge, 21:54 UTC+10); forensic archive `/var/log/mission-1-archaeology/wedge-2026-05-28-21-54/`. **PINPOINT-1 instrumented re-test 2026-05-29 09:13–09:19 UTC+10 reproduced the wedge with full telemetry** — forensic archive `/var/log/mission-1-archaeology/pinpoint1-wedge-2026-05-29/`. |
 | **fake-5090 mechanism** | Hybrid substrate state — chip responds normally to passive MMIO probes (PMC_BOOT_0, ReBAR cap reads, AER status reads) AND GSP firmware loads OK at probe AND nominal close-path telemetry succeeds — but the chip's PCIe equalization and LTR state are divergent from cold-boot (Phy16Sta `EquComplete-`, LTR latencies = 0, lane-equalization presets in transient state). Substrate honours all driver work UP TO `nv_shutdown_adapter`/post-shutdown telemetry; from there forward, one of `gpuStateDestroy` / `RmTeardownDeviceDma` / `RmTeardownRegisters` performs chip-touching operations that depend on the missing init state and silently hangs. No Xid, no AER, no sentinel return — the wedge is in-step inside a teardown function call that never returns. |
 
-## Symptom (driver view)
+## Mechanism (revised 2026-05-29 evening — wedge is in RE-INIT, not in teardown)
+
+The 2026-05-29 evening Test #1 (2x `nvidia-smi -L` cycle with bpftrace + post-modprobe attach attempt, on userspace-recovered chip) produced a controllable, fast reproduction. Cycle 1's close-path completed cleanly through `post-shutdown` and `close-exit` with WPR2 driven to 0. Cycle 2's `nvidia-smi -L`, fired 2 seconds later, wedged the host with **zero kernel journal output after the cycle-2 kmsg start marker**. Forensic archive: `/var/log/mission-1-archaeology/c1-test1-wedge-2026-05-29/`.
+
+**Revised mechanism (now n=4):** F40 is a **chip re-init wedge** on the OPEN path after a clean `nv_shutdown_adapter` on a chip in the userspace-recovered state. The wedge mechanism is:
+
+1. F41 (chip ReBAR Control register reset on TB hot-add) leaves the chip in a state where some chip-internal pre-conditions for re-init are not met (the signature is `0x110094 == 0xbadf2100`, surfacing as `gpuHandleSanityCheckRegReadError_GH100` on the first MMIO).
+2. The first `LAST-CLOSE` after probe runs `nv_shutdown_adapter` → `RmShutdownAdapter`'s destructive teardown (`gpuStateDestroy`, DMA teardown, BAR ioremap teardown, gpumgr detach). This step COMPLETES — A4's `post-shutdown` and `close-exit` telemetry fire, WPR2 → 0, the chip is in a "MMIO-responsive, GSP-off" state. **The destructive teardown is not the problem.**
+3. The next `nv_open_device` on `/dev/nvidia0` runs the first-fd-init branch, which calls `RmInitAdapter` to re-bring the chip up. On a userspace-recovered chip, that re-init path hangs in chip-touching code that never returns — the chip's PCIe equalization / GSP-boot pre-conditions are not in the state `RmInitAdapter` expects.
+
+**The minimum-viable trigger** is **2x `nvidia-smi -L` with 2s between them** on a userspace-recovered chip. No nvbandwidth, no CUDA, no 10-minute idle. Yesterday's C1 reproduction at 10m 41s was the same mechanism with a heavier trigger (nvbandwidth's CUDA init) and longer-than-necessary delay.
+
+**What this changes from the original framing:**
+
+- The original title ("`RmShutdownAdapter` destructive-teardown wedge") is now a historical misnomer. The teardown completes. Title preserved for traceability.
+- The original "Symptom (driver view)" section below (claiming the wedge fires "from close-exit forward, … inside a teardown function call that never returns") is wrong. Close-exit fires. Callback-exit fires. The teardown call chain returns. The wedge fires on the SUBSEQUENT OPEN's `RmInitAdapter`.
+- The original "Trigger sequence" step 6 (substrate hangs inside a destructive teardown step) is wrong. Substrate model needs to model the OPEN-path re-init hanging on the userspace-recovered chip-state, not a teardown step.
+- The fake-5090 substrate spec moves accordingly: a single test cycle is open-1 → close-1 (clean) → open-2 (wedge), not open-1 → close-1 (wedge).
+
+**Why earlier reproductions misled the framing:**
+
+- PINPOINT-1 (this morning) showed printk going silent at `callback-exit`. The 5m 41s wait until a "user-visible wedge" was actually idle until SOME downstream subsystem made a chip-touching system call equivalent to a second open. The "5m 41s silent kernel" interpretation was wrong; the kernel was alive, the chip was alive, and the wedge only fired when something touched the chip again.
+- C1 (yesterday) showed the wedge at 10m 41s on nvbandwidth start. nvbandwidth was just the second open in that case; CUDA init wasn't required, the 10-min idle wasn't required.
+- Run 2 of yesterday's PINPOINT-2 (`rmmod` path wedge) was a rmmod-cycle that included a subsequent rebind / re-init. The wedge fired on the re-init half of the rmmod+modprobe cycle, not on the rmmod half.
+
+All four reproductions are consistent with the corrected mechanism. Earlier "runtime PM" / "deferred RCU" / "kworker chip touch" candidate mechanisms are no longer needed to explain the data.
+
+### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
+
+The F40b structural fix design at `nvidia-driver-injector/docs/missions/.../design/F40b-structural-fix-2026-05-29.md` needs to re-cut the wrap site:
+
+- **OLD (now invalid):** bounded-wait wrapper around `nv_shutdown_adapter`, PCIe link-disable fallback on shutdown hang, `DETECTOR_TEARDOWN_TIMEOUT`.
+- **NEW (informed by Test #1 data):** the cheapest correct fix is a **probe-time poison flag** keyed on the divergent-state signature (`0x110094 == 0xbadf2100` on first MMIO, or per a more reliable indicator if one emerges from further characterization). When the flag is set, the next `nv_open_device` after a `LAST-CLOSE` returns `-EIO` instead of running `RmInitAdapter`. Userspace gets an explicit "chip needs PCI re-enum" signal; the kernel never enters the hanging code path. This dodges the wedge by refusing to enter the hanging operation; no bounded-wait worker required.
+- **NEW (alternative — bounded wait if poison-flag detection is unreliable):** wrap `nv_open_device`'s first-fd-init branch (entry to `RmInitAdapter`) in the bounded-wait pattern; on timeout, `pci_dev_set_disconnected` + PCIe link-disable + return `-EIO` from open. New C5 detector class: `DETECTOR_REINIT_TIMEOUT`.
+
+F40a (probe-time persistence engagement) is still valuable, but for a different reason than the original design said: persistence keeps `usage_count > 0` so LAST-CLOSE never fires `nv_shutdown_adapter`, which means the chip never enters the post-shutdown state, which means the wedge-triggering re-init path is never reached. F40a doesn't "detect and prevent" the wedge — it stays out of the state machine where the wedge lives.
+
+### Reproduction recipe (canonical, n=4, 2026-05-29 evening)
+
+```
+1. Get chip into userspace-recovered state:
+   a. echo 0 > /sys/bus/thunderbolt/devices/0-1/authorized    # TB deauth
+   b. sleep 2
+   c. echo 1 > /sys/bus/thunderbolt/devices/0-1/authorized    # TB reauth → broken-BAR1 (256 MiB)
+   d. sleep 4
+   e. setpci -s 04:00.0 COMMAND=0:3                           # clear mem decoding (fix-bar1 safety check)
+   f. /root/nvidia-driver-injector/tools/fix-bar1.sh          # recover BAR1 to 32 GiB
+
+2. Bind driver (NO persistence):
+   a. echo > /sys/bus/pci/devices/0000:04:00.0/driver_override   # fix-bar1 leaves this "none"
+   b. modprobe --ignore-install nvidia                           # host policy blocks plain modprobe
+
+3. Reproduce:
+   a. nvidia-smi -L      # cycle 1 — close-path completes; LAST-CLOSE drives WPR2 → 0
+   b. sleep 2
+   c. nvidia-smi -L      # cycle 2 — wedges immediately on RmInitAdapter
+
+Expected: cycle 2 never returns. Host journal stops at cycle-2 start kmsg marker.
+Recovery: hard reboot.
+```
+
+Two gotchas required for reproducibility on this hardware that the original F40 entry did not surface:
+- `fix-bar1.sh` sets `driver_override=none` and does not clear it. Modprobe (with or without `--ignore-install`) silently no-ops in that state ("The NVIDIA probe routine was not called for 1 device(s)"). Cure: `echo > driver_override` before modprobe.
+- Host has `install nvidia /bin/false` in `/etc/modprobe.d/nvidia-driver-injector.conf` (the container-only-load policy). Cure: `modprobe --ignore-install nvidia` or run from inside the injector container.
+
+## Symptom (driver view) — original framing, see §Mechanism for corrected understanding
 
 After a non-cold-boot init path leaves the chip in a state where PCIe equalization (Phy16Sta `EquComplete+`/Phase1/2/3 bits) was not run to completion — observed on this project after the userspace H1 recovery sequence (chip ReBAR Control rewrite + pciehp slot cycle, per F41) — the chip presents as healthy by every passive probe:
 
