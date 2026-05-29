@@ -136,6 +136,34 @@ n=2 of 3 wedge, n=1 of 3 -EIO. The mechanism is the same race in all three; the 
 
 Test B v2 is **evidence the C5 machinery works when given the chance**; it is **not evidence that AER fires reliably enough to give it the chance.**
 
+### Structural close VALIDATED (2026-05-29 evening, F40B-TEST n=2)
+
+The A6 patch (`patches/addon/A6-f40b-bounded-wait-open.patch`, committed at `nvidia-driver-injector@c8d3c68`) implements the bounded-wait wrapper. Two consecutive test cycles confirmed the structural close works:
+
+**F40B-TEST run #1 (19:48):**
+- Cycle 1 (nvidia-smi -L): all 3 fd opens completed within 200 ms budget, rc=0; LAST-CLOSE close-path ran cleanly with WPR2 → 0.
+- Cycle 2 (bash `exec 3</dev/nvidia0`): bounded worker scheduled, MMIO hung inside RmInitAdapter, syscall thread woke from timeout at **201.7 ms** (matches the 200 ms budget). F40b code called `rm_cleanup_gpu_lost_state(sp, nv, NV_GPU_LOST_DETECTOR_AER_FATAL)`. C5 sink propagated, emitted `PERMANENT_FAIL`. Open returned `-EIO`. Bash reported `Input/output error`. Host stayed alive.
+
+**F40B-TEST run #2 (19:50):**
+- Same precondition (rmmod + TB recycle + fix-bar1 + modprobe). Same cycle 1 + cycle 2 sequence.
+- Cycle 2 timed out at **203.5 ms**. Same F40b log sequence. Same -EIO outcome. Host stayed alive.
+
+Both runs produced identical kernel markers:
+
+```
+NVRM: tb_egpu [F40b]: open scheduled to bounded worker (timeout=200 ms)
+NVRM: tb_egpu [F40b]: open completed within budget rc=0     ← cycle 1 opens
+NVRM: tb_egpu [F40b]: open scheduled to bounded worker (timeout=200 ms)
+NVRM: tb_egpu [F40b]: open timed out after 200 ms — declaring GPU lost ...
+NVRM: GPU 0000:04:00.0: tb_egpu recover: trigger gated (sink-set: GPU already declared lost (C5 sink)); emitting PERMANENT_FAIL
+```
+
+**The F40 wedge class is now structurally closed.** The fix is deterministic (200 ms upper bound on the wait, configurable via `NVreg_TbEgpuOpenTimeoutMs`), does not depend on AER firing in time, and produces clean -EIO to userspace with the chip declared lost via C5's sink mechanism. The leaked worker thread is bounded in lifetime (it exits when its MMIO fails-fast post-sink-set).
+
+Forensics: F40B-TEST runs live in the host journal at 19:48–19:50 on 2026-05-29 (not archived — this is the SUCCESS case, no wedge to forensic).
+
+Implementation: `patches/addon/A6-f40b-bounded-wait-open.patch` in the nvidia-driver-injector repo.
+
 Forensics: `/var/log/mission-1-archaeology/verify-wedge-2026-05-29/FORENSICS-REPORT.md`, `/var/log/mission-1-archaeology/tbv2n2-wedge-2026-05-29/FORENSICS-REPORT.md` (this round); `/var/log/mission-1-archaeology/diff3-wedge-2026-05-29/FORENSICS-REPORT.md` and onward (preceding investigation).
 
 ### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
