@@ -171,6 +171,54 @@ Implications:
 
 Catalog confidence remains field-bug n=3 (yesterday cycle 2; this morning Run 1's apparent survival was a false negative; this morning Run 2's restore attempt). The wedge mechanism is still partially unknown.
 
+## Refined architecture goal (2026-05-29 evening — design-phase decision)
+
+The project's earlier framing ("persistence engagement prevents the wedge; that's the production answer") is operationally true but architecturally insufficient. F40 represents a failure CLASS — destructive teardown hanging on a chip in a state the driver doesn't fully model — that should be closed STRUCTURALLY in the NVIDIA driver fork, not merely dodged in production via the persistence policy.
+
+### Reference model — Windows driver
+
+The Windows NVIDIA driver presumably handles this class correctly. The Windows OS model includes:
+- Bounded driver-callback contracts (the OS gives the driver N ms to release HW, then force-removes)
+- Explicit chip-state validation at each step (sentinel reads, abort-early on `0xFFFFFFFF`)
+- PCIe link-level fallback when the driver can't make progress
+
+Linux PCI driver model has none of this by default — `device_release_driver` waits as long as the driver's `remove` callback takes, MMIO reads block the CPU until PCIe completion timeout. We need to build these protections INTO our nvidia.ko fork.
+
+### Principle: tear down what needs tearing down — make it cancellable
+
+`RmShutdownAdapter`'s extra work is correct and required at rmmod time:
+- DMA mappings MUST be undone (else IOMMU/kernel VA leak)
+- BAR ioremaps MUST be undone (else kernel VA leak)
+- `gpumgrDetachGpu` MUST run (else next probe sees stale state)
+- `gpuStateDestroy` MUST free RM-side structures (else permanent leak per device-bind)
+
+Skipping these via "always use `rm_disable_adapter` on rmmod path" was incorrect — it leaks resources and leaves the GPU manager registry corrupt. The right fix is to make each destructive step ABORT-SAFE.
+
+### Three-layer architecture (F40b)
+
+1. **Bounded-wait wrapper** around destructive teardown — schedule the call on a worker thread; main thread waits with a configurable timeout. If the worker hangs in MMIO (the F40 case), the main thread proceeds to escalation rather than freezing the host.
+2. **PCIe link-disable fallback** — on timeout, write the `PCI_EXP_LNKCTL_LD` bit on the parent bridge. This is the kernel's own mechanism for surprise removal. After link disable, MMIO to the device fails fast (CRS or `0xFFFFFFFF`) instead of hanging.
+3. **C5 sink-state escalation with new detector class** — fire `cleanupGpuLostStateAtomic(pGpu, DETECTOR_TEARDOWN_TIMEOUT)` to mark the GPU as lost. Subsequent cleanup runs in "lost mode" via C5's existing sink-state awareness, doing only kernel-side resource work (DMA unmap, iounmap, gpumgr detach) — no further chip touches.
+
+### Decoupling from E27 (the F41 kernel patch)
+
+E27 fixes F41 (chip ReBAR Control reset on TB hot-add) at the kernel level. F40b fixes F40 at the driver level. They are INDEPENDENT — either alone closes the user-visible failure for the TB-eGPU case:
+
+| Failure scenario | E27 alone | F40b alone | Both |
+|---|---|---|---|
+| TB deauth → broken-BAR1 (F41) | ✓ (no broken-BAR1) | ✗ (still need `fix-bar1.sh`) | ✓ |
+| F40 close-path wedge | ✓ (precondition absent) | ✓ (bounded wait + sink) | ✓ |
+| F40 rmmod-path wedge | ✓ (precondition absent) | ✓ (bounded wait + sink) | ✓ |
+| Chip-state divergence from other causes | ✗ | ✓ (detector fires regardless) | ✓ |
+
+F40b's structural closure is broader than E27's indirect coverage. Even if some future code path or hardware variant produces a similar chip-state divergence, F40b's detector fires and the cleanup completes safely. This is the architectural value of fixing in-driver vs. only in-kernel.
+
+### Status
+
+Design phase — currently pending characterization tests (PINPOINT-2 + bpftrace with wedge fire, rmmod-path on cold-plug chip, persistence+uninstall on recovered chip) to inform the bounded-wait timeout values, validate the link-disable fallback works on TB-tunneled bridges, and confirm whether rmmod-path wedge is the same mechanism as the close-path wedge or a separate failure mode.
+
+Canonical design doc: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/design/F40b-structural-fix-2026-05-29.md`.
+
 ## fake-5090 mechanism mapping
 
 **Substrate-side hybrid state machine.** This is a more elaborate substrate model than F22's "wedge-without-signal" because the substrate must:
