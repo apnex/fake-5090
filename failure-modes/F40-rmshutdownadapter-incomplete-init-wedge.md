@@ -87,6 +87,41 @@ The full-precondition reproduction ran and wedged on cycle 2 as predicted (**n=5
 
 Forensics: `/var/log/mission-1-archaeology/c1-test1-fullpre-wedge-2026-05-29/FORENSICS-REPORT.md`.
 
+### BREAKTHROUGH (2026-05-29 evening, Test B v2 + VERIFY)
+
+**The F40 wedge mechanism is a PCIe Completion Timeout AER race during chip re-init MMIO.** Two adjacent runs proved this:
+
+**Test B v2 (cycle 1 + cycle 2 + bpftrace running with 47 probes)** — cycle 2 reached `nvidia_open`'s `foreground-pre-init`, called `nv_open_device_for_nvlfp`, issued MMIO to the chip. ~1 second later, kernel reported:
+
+```
+pcieport 0000:00:07.0: AER: Uncorrectable (Non-Fatal) error message received from 0000:04:00.0
+tb_egpu recover: AER error_detected fired on 0000:04:00.0 (channel state=1)
+                  AER UESta=0x00004000  ← bit 14 = Completion Timeout (CTO)
+tb_egpu recover: error_detected -> NEED_RESET (scheduling bus reset; attempts=1/3)
+tb_egpu recover: error_detected -> DISCONNECT (rate-limited (H2); attempts=1/3)
+tb_egpu recover: trigger gated (sink-set: GPU already declared lost (C5 sink)); emitting PERMANENT_FAIL
+NVRM: tb_egpu [OPEN]: site=foreground-post-init pid=40328 rc=-5
+NVRM: tb_egpu [OPEN]: site=exit pid=40328 rc=-5
+```
+
+C5 caught the AER, set sink-state, returned -EIO. Host stayed alive. Bash got `Input/output error`.
+
+**VERIFY (same sequence, no bpftrace)** — cycle 2 wedged. NO PINPOINT-3 markers fired for cycle 2 (the kernel froze before `nvidia_open`'s `entry` marker could fire). NO AER message. NO C5 recovery output. The host froze hard, required reboot.
+
+**Mechanism narrative**:
+
+1. cycle 2 bash `exec 3</dev/nvidia0` → kernel open-syscall path → `nvidia_open` → foreground branch → `nv_open_device_for_nvlfp` → `nv_open_device` → `RmInitAdapter` issues an MMIO TLP to a chip register.
+2. The chip (in userspace-recovered post-shutdown state) does not produce a completion for the TLP.
+3. The PCIe root complex's Completion Timeout timer starts (50 ms default).
+4. The CPU executing the MMIO read is blocked waiting for completion data.
+5. THE RACE: when CTO fires, an AER interrupt is delivered. The AER handler (tb_egpu_aer_handler / C5 recovery) is supposed to be invoked on a different CPU, set sink-state, and abort the MMIO. Whether this races against a kernel-wide deadlock determines the outcome:
+   - bpftrace running (47 kprobes in the path): kprobe overhead provides scheduling slack. AER handler runs in time. C5 catches, returns -EIO.
+   - no bpftrace: MMIO blocking + scheduler critical sections + lock acquisition order races deadlock the kernel before AER handler can run. Host wedges.
+
+**Implications for fix path**: now firmly established as F40b Tier 2 in the design doc — bounded-wait wrapper around `nv_open_device_for_nvlfp` so the MMIO has a timeout that exceeds 50 ms CTO. On timeout: `pci_dev_set_disconnected` + C5 sink-set + return -EIO. The behavior we want is what Test B v2 produced; we just need to engineer it deterministically instead of relying on bpftrace-induced timing.
+
+Forensics: `/var/log/mission-1-archaeology/verify-wedge-2026-05-29/FORENSICS-REPORT.md` (this run), `/var/log/mission-1-archaeology/diff3-wedge-2026-05-29/FORENSICS-REPORT.md` and onward (preceding investigation).
+
 ### Implications for F40b architecture (replaces the older "Three-layer architecture" section below)
 
 The F40b structural fix design at `nvidia-driver-injector/docs/missions/.../design/F40b-structural-fix-2026-05-29.md` needs to re-cut the wrap site:
