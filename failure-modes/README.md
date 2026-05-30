@@ -1,7 +1,7 @@
 # Failure-Mode Index — nvidia-driver-injector patch set
 
 **Date:** 2026-05-27
-**Patch set:** `nvidia-driver-injector` C1–C5, E1, A1–A5
+**Patch set:** `nvidia-driver-injector` C1–C5, E1, A1–A8 *(A6/A7/A8 = the F40b bounded-wait + observability family, added after the 2026-05-27 index date)*
 **Source of truth:** `docs/patch-intents/*.md` in the injector repo (GIVEN/WHEN/THEN scenarios are authoritative; raw patches are sanity-check material only).
 **Purpose:** Test specification for `fake-5090`. Each F-entry describes a failure mode the injector patches defend against, expressed from the *driver's* perspective, with the concrete `fake-5090` mechanism that reproduces it and the concrete assertion shape a test author can implement.
 
@@ -49,7 +49,7 @@
 | [F24](F24-sanity-check-noise-budget.md) | Sanity-check noise — diagnostic `NV_PRINTF` lines reachable on lost-GPU paths | C5 (v3 sanity-check class) | hypothesis | Surprise-removal A + dmesg-noise budget assertion |
 | [F25](F25-dump-rpc-self-dos.md) | Crash-dump RPC self-DoS — `DUMP_PROTOBUF_COMPONENT` fn 78 blocks 5 s | C5 (v4) | field-bug | Surprise-removal A + crash-dump RPC scenario |
 | [F28](F28-client-count-warn-cascade.md) | Client-count `WARN_ON` cascade — kernel-side close-path WARN floods on lost GPU | C5 (v4) | hypothesis | Surprise-removal A + active-client FD scenario |
-| [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | C5 (out-of-scope class — documented coverage boundary); A4 (telemetry that bounded the wedge) | field-bug (n=2 confirmed; wedge fires AFTER `nvidia_close_callback` returns — printk goes silent ~immediately; user-visible symptom delayed ~5 min) | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
+| [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | **A6** (open-arm bounded-wait), **A7** (shutdown-arm bounded-wait) — the in-driver F40b fix; C5 (sink); A4 (telemetry that surfaced it) | field-bug (n=2 confirmed; wedge fires AFTER `nvidia_close_callback` returns — printk goes silent ~immediately; user-visible symptom delayed ~5 min) | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
 
 ### Layer 2 — Driver-internal cascade (cross-module)
 
@@ -129,6 +129,9 @@ Every `F<NN>-<slug>.md` has:
 | A3 recovery | F2, F6, F10, F23, F27, F34, F38 |
 | A4 close-path-telemetry | F11, F12, F13, F26 (partial), F33 (disconnect-reason), F34 (burst-detection), F36 (cluster surface), F37 (cluster surface), F40 (close-path bounding telemetry that surfaced the wedge) |
 | A5 version-and-toggles | *(substrate — observability surface for A2/A3/A4)* |
+| A6 f40b-bounded-wait-open | F40 **open arm** (`RmInitAdapter` GSP-lockdown wedge — confirmed mechanism: `kgspBootstrap_GH100 → gpuTimeoutCondWait(_kgspLockdownReleasedOrFmcError)`, the GSP never releases lockdown on a userspace-recovered chip). Bounds the wait → deterministic `-EIO`. **Coverage boundary (patch property, NOT a failure mode):** does NOT cover the *first* open of a bind — its gate `nv->is_external_gpu` is set lazily inside that open's `RmInitAdapter` (`osinit.c:1301`); a re-probe/rebind onto a bad chip makes the wedge the unguarded first open. |
+| A7 f40b-bounded-wait-shutdown | F40 **shutdown arm** (`rm_shutdown_adapter` ~600 ms GSP-unload RPC — not a hang). Same `is_external_gpu` first-open coverage boundary as A6. |
+| A8 f40b-sysfs-observability | F40 (observability surface, not a defense): `tb_egpu_state`, `tb_egpu_is_external`, `tb_egpu_f40b_fires`, recovery counters. `tb_egpu_is_external` makes the A6/A7 first-open coverage boundary observable. |
 
 ## Patches → out-of-scope cases (operator/cluster/kernel paths)
 
@@ -143,7 +146,7 @@ Every `F<NN>-<slug>.md` has:
 | F36 | NVIDIA Device Plugin cluster-aware enhancement (consume A4 telemetry surface) |
 | F37 | NVIDIA Device Plugin fast-fail enhancement (consume A4 persistent-kill marker) |
 | F38 | Operator-driven `setpci` SBR-toggle for bus-level reset (per-board recipe) |
-| F40 | Persistence-mode engagement immediately after `modprobe nvidia` (verified n=2 2026-05-28); injector container entrypoint + `tools/fix-bar1.sh --bind` already do this. Driver-side coverage extension candidates: pre-shutdown detector class, step-level `RmShutdownAdapter` hardening, or external-GPU persistence-default policy — none yet patched. |
+| F40 | Persistence-mode engagement immediately after `modprobe nvidia` (verified n=2 2026-05-28); injector container entrypoint + `tools/fix-bar1.sh --bind` already do this. **Driver-side fix landed (A6/A7 = F40b):** bounded-wait wrappers on both arms → deterministic `-EIO` instead of wedge (open-arm mechanism confirmed = GSP lockdown-release wait). **Remaining coverage boundary:** A6/A7 gate on the lazily-set `is_external_gpu`, so they do NOT guard the *first* open of a bind — a re-probe/rebind onto a bad chip still wedges; fix candidate = classify at probe time. Persistence-mode engagement stays the operational mitigation (keeps `usage_count>0` so LAST-CLOSE never enters the wedge-prone re-init). |
 | F41 | Userspace recovery via `tools/fix-bar1.sh` (write chip ReBAR Control to max + pciehp slot cycle; verified n=2 2026-05-28) until kernel E27 patch lands on TB hot-add code path. Operator alternative: avoid TB tunnel teardown events (no cable yank, no chassis power-cycle, no boltctl deauth) and reboot-recovery if one occurs. |
 
 ## Conventions used in per-entry files
