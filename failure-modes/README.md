@@ -17,7 +17,7 @@
 
 | Metric | Count |
 |---|---|
-| Total failure modes | 41 |
+| Total failure modes | 42 |
 | Reproducible in `fake-5090` (v1 substrate sufficient) | 27 |
 | Reproducible in `fake-5090` (v1+ substrate with chip-state + close-path extensions) | 1 (F40 + F41 as a pair; v1 base + chip-ReBAR-CTRL substrate state + close-path-step substrate state) |
 | Reproducible with Phase 3 multi-device substrate | 2 (F19, F37) |
@@ -26,7 +26,7 @@
 | Not-reproducible-by-design (telemetry-presence asserted instead) | 2 (F11, F13) |
 | Documentation-class entries (no runtime assertion) | 1 (F38) |
 | Confidence: field-bug | 21 |
-| Confidence: hypothesis | 11 |
+| Confidence: hypothesis | 12 |
 | Confidence: community-evidence | 8 |
 | Confidence: doc-only (misattributed but documented) | 1 |
 
@@ -50,6 +50,7 @@
 | [F25](F25-dump-rpc-self-dos.md) | Crash-dump RPC self-DoS — `DUMP_PROTOBUF_COMPONENT` fn 78 blocks 5 s | C5 (v4) | field-bug | Surprise-removal A + crash-dump RPC scenario |
 | [F28](F28-client-count-warn-cascade.md) | Client-count `WARN_ON` cascade — kernel-side close-path WARN floods on lost GPU | C5 (v4) | hypothesis | Surprise-removal A + active-client FD scenario |
 | [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | **A6** (open-arm bounded-wait), **A7** (shutdown-arm bounded-wait) — the in-driver F40b fix; C5 (sink); A4 (telemetry that surfaced it) | field-bug (n=2 confirmed; wedge fires AFTER `nvidia_close_callback` returns — printk goes silent ~immediately; user-visible symptom delayed ~5 min) | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
+| [F42](F42-leaked-bounded-wait-worker-uaf.md) | Leaked F40b bounded-wait worker executes in freed `nvidia.ko` `.text`/`nvl` when `rmmod`/`unbind` races it → use-after-free | A7 (`flush_work` guard, SH-3); **A6 = gap (no guard)** | hypothesis (source-audit certain; not crash-observed) | Host-kernel lifecycle race: chip-hang substrate + teardown-during-hang + KASAN build |
 
 ### Layer 2 — Driver-internal cascade (cross-module)
 
@@ -129,8 +130,8 @@ Every `F<NN>-<slug>.md` has:
 | A3 recovery | F2, F6, F10, F23, F27, F34, F38 |
 | A4 close-path-telemetry | F11, F12, F13, F26 (partial), F33 (disconnect-reason), F34 (burst-detection), F36 (cluster surface), F37 (cluster surface), F40 (close-path bounding telemetry that surfaced the wedge) |
 | A5 version-and-toggles | *(substrate — observability surface for A2/A3/A4)* |
-| A6 f40b-bounded-wait-open | F40 **open arm** (`RmInitAdapter` GSP-lockdown wedge — confirmed mechanism: `kgspBootstrap_GH100 → gpuTimeoutCondWait(_kgspLockdownReleasedOrFmcError)`, the GSP never releases lockdown on a userspace-recovered chip). Bounds the wait → deterministic `-EIO`. **Coverage boundary (patch property, NOT a failure mode):** does NOT cover the *first* open of a bind — its gate `nv->is_external_gpu` is set lazily inside that open's `RmInitAdapter` (`osinit.c:1301`); a re-probe/rebind onto a bad chip makes the wedge the unguarded first open. |
-| A7 f40b-bounded-wait-shutdown | F40 **shutdown arm** (`rm_shutdown_adapter` ~600 ms GSP-unload RPC — not a hang). Same `is_external_gpu` first-open coverage boundary as A6. |
+| A6 f40b-bounded-wait-open | F40 **open arm** (`RmInitAdapter` GSP-lockdown wedge — confirmed mechanism: `kgspBootstrap_GH100 → gpuTimeoutCondWait(_kgspLockdownReleasedOrFmcError)`, the GSP never releases lockdown on a userspace-recovered chip). Bounds the wait → deterministic `-EIO`. **Coverage boundary (patch property, NOT a failure mode):** does NOT cover the *first* open of a bind — its gate `nv->is_external_gpu` is set lazily inside that open's `RmInitAdapter` (`osinit.c:1301`); a re-probe/rebind onto a bad chip makes the wedge the unguarded first open. **Also relates to F42:** the leaked open-path worker has no `flush_work` guard → UAF if rebind/rmmod races it; the A9 first-open fix broadens that window. |
+| A7 f40b-bounded-wait-shutdown | F40 **shutdown arm** (`rm_shutdown_adapter` ~600 ms GSP-unload RPC — not a hang). Same `is_external_gpu` first-open coverage boundary as A6. **Defends [F42]** — the SH-3 `flush_work` guard joins the leaked shutdown worker before teardown, preventing the leaked-worker UAF (A6 has no such guard). |
 | A8 f40b-sysfs-observability | F40 (observability surface, not a defense): `tb_egpu_state`, `tb_egpu_is_external`, `tb_egpu_f40b_fires`, recovery counters. `tb_egpu_is_external` makes the A6/A7 first-open coverage boundary observable. |
 
 ## Patches → out-of-scope cases (operator/cluster/kernel paths)
