@@ -1,7 +1,7 @@
 # Failure-Mode Index — nvidia-driver-injector patch set
 
 **Date:** 2026-05-27
-**Patch set:** `nvidia-driver-injector` C1–C5, E1, A1–A8 *(A6/A7/A8 = the F40b bounded-wait + observability family, added after the 2026-05-27 index date)*
+**Patch set:** `nvidia-driver-injector` C1–C6, E1, A1–A11 *(A6/A7/A8 = the F40b bounded-wait + observability family; A9 = probe-time `is_external_gpu` classify; A10 = `f40b-lockfree-sink`, the F44 fix; **A11 = `f45-deadlock-breaker` + C6 = `cond-acquire-rwlock-fix` (the inverted-COND-primitive prerequisite) = the F45 fix, deployed apnex.27 2026-06-02** — all after the 2026-05-27 index date)*
 **Source of truth:** `docs/patch-intents/*.md` in the injector repo (GIVEN/WHEN/THEN scenarios are authoritative; raw patches are sanity-check material only).
 **Purpose:** Test specification for `fake-5090`. Each F-entry describes a failure mode the injector patches defend against, expressed from the *driver's* perspective, with the concrete `fake-5090` mechanism that reproduces it and the concrete assertion shape a test author can implement.
 
@@ -17,15 +17,15 @@
 
 | Metric | Count |
 |---|---|
-| Total failure modes | 42 |
-| Reproducible in `fake-5090` (v1 substrate sufficient) | 27 |
+| Total failure modes | 44 |
+| Reproducible in `fake-5090` (v1 substrate sufficient) | 28 |
 | Reproducible in `fake-5090` (v1+ substrate with chip-state + close-path extensions) | 1 (F40 + F41 as a pair; v1 base + chip-ReBAR-CTRL substrate state + close-path-step substrate state) |
 | Reproducible with Phase 3 multi-device substrate | 2 (F19, F37) |
 | Real-hardware-only (route to `scripts/aer-harness` or apnex rig) | 5 (F14, F21, F29, F30, F31, F35) |
 | Cluster-layer-only (route to real k8s cluster) | 2 (F36, F37) |
 | Not-reproducible-by-design (telemetry-presence asserted instead) | 2 (F11, F13) |
 | Documentation-class entries (no runtime assertion) | 1 (F38) |
-| Confidence: field-bug | 21 |
+| Confidence: field-bug | 22 |
 | Confidence: hypothesis | 12 |
 | Confidence: community-evidence | 8 |
 | Confidence: doc-only (misattributed but documented) | 1 |
@@ -49,8 +49,12 @@
 | [F24](F24-sanity-check-noise-budget.md) | Sanity-check noise — diagnostic `NV_PRINTF` lines reachable on lost-GPU paths | C5 (v3 sanity-check class) | hypothesis | Surprise-removal A + dmesg-noise budget assertion |
 | [F25](F25-dump-rpc-self-dos.md) | Crash-dump RPC self-DoS — `DUMP_PROTOBUF_COMPONENT` fn 78 blocks 5 s | C5 (v4) | field-bug | Surprise-removal A + crash-dump RPC scenario |
 | [F28](F28-client-count-warn-cascade.md) | Client-count `WARN_ON` cascade — kernel-side close-path WARN floods on lost GPU | C5 (v4) | hypothesis | Surprise-removal A + active-client FD scenario |
-| [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) | `RmShutdownAdapter` destructive-teardown wedge on chip-responsive but incompletely-initialized state | **A6** (open-arm bounded-wait), **A7** (shutdown-arm bounded-wait) — the in-driver F40b fix; C5 (sink); A4 (telemetry that surfaced it) | field-bug (n=2 confirmed; wedge fires AFTER `nvidia_close_callback` returns — printk goes silent ~immediately; user-visible symptom delayed ~5 min) | Chip-state substrate (`userspace-recovered`) + step-level wedge-injection in destructive teardown |
+| [F40](F40-reinit-gsp-lockdown-wedge.md) | Open-arm re-init wedge — `RmInitAdapter` GSP lockdown-release stall on a userspace-recovered chip (GSP never releases secure-boot lockdown → multi-second lock-holding busy-poll → host deadlock) | **A6** (open-arm bounded-wait → deterministic `-EIO`); C5 (sink); A4 (telemetry that surfaced it); A9 (probe-time classify — closes A6's first-open coverage hole) | field-bug (n=13 reboots; Lane-2 PMU n=4 pinned the site) | Chip-state substrate (`userspace-recovered`) + GSP-lockdown-poll injection on re-init |
 | [F42](F42-leaked-bounded-wait-worker-uaf.md) | Leaked F40b bounded-wait worker executes in freed `nvidia.ko` `.text`/`nvl` when `rmmod`/`unbind` races it → use-after-free | A7 (`flush_work` guard, SH-3); **A6 = gap (no guard)** | hypothesis (source-audit certain; not crash-observed) | Host-kernel lifecycle race: chip-hang substrate + teardown-during-hang + KASAN build |
+| [F43](F43-gsp-unload-rpc-latency-vs-naive-budget.md) | GSP RM-unload RPC latency (~600 ms) exceeds a naive teardown timeout budget → iatrogenic premature GPU-lost (NOT a hang; chip alive, RPC completes) | **A7** (budget `NVreg_TbEgpuShutdownTimeoutMs=1200` ≥2× the RPC); SH-1/SH-2/SH-3 (characterization) | field-bug (~600 ms latency measured n≥4; the failure it produces is iatrogenic) | Shutdown-path GSP-unload latency param + budget-vs-latency sweep |
+| [F44](F44-f40b-cleanup-lock-inversion-wedge.md) | F40b timeout-branch **lock-inversion deadlock** on the WPR2-clear lockdown substrate — A6's timeout `rm_cleanup_gpu_lost_state` BLOCKING-acquires the RM API lock the worker holds (C5 sink can't arm) + AER/`rmmod` second-contender → instant silent host wedge. A6 contains the WPR2-fast-fail twin but NOT this. | **A10** (`f40b-lockfree-sink`: `os_pci_set_disconnected` in the A6/A7 timeout branch → worker self-terminates via `osIsGpuBusDead`); C1 (`rm_cleanup` `COND_ACQUIRE`); C3 (AER non-blocking) | **field-bug** (live host hard-wedge 2026-06-02, 2 reboots; source-confirmed) | Chip-state `userspace-recovered + WPR2=0 + lockdown-stuck` + re-open + AER second-contender injection |
+| [F45](F45-coldinit-apilock-deadlock.md) | Cold-bringup **RM-API rwsem deadlock** — a failed cold first-open (H16 GSP-heartbeat transient → GPU lost) parks the single-threaded deferred-open worker on `rm_get_adapter_status`'s blocking API-lock acquire → close (`nv_wait_open_complete`) + pciehp (`nv_kthread_q_flush`) wedge → reboot-only (immune to FLR/TB-unauth). Sibling of F44 (distinct trigger+site). | **A11** (D1 lock-free early-bail + `is_external_gpu`-gated `COND_ACQUIRE` in `rm_get_adapter_status`); **C6** (corrects the inverted `os_cond_acquire_rwlock_*` primitive A11's COND depends on) | **field-bug** (live host hard-wedge 2026-06-02; kdump-capture itself hung→reboot; source-reconstructed, no vmcore) | Chip-state `cold-init-fails-at-GSP-heartbeat` + 2nd API-lock contender + deferred-open path |
+| [F46](F46-hoa2-unbounded-init-wedge.md) | **H-OA2 un-bounded first-open init wedge** — A6 bounds only the H-OA1 `/dev/nvidia0` open; the SAME cold init runs UN-bounded via `nvidia_dev_get`/`_uuid` (modeset/UVM/P2P), deferred-open, probe, and the power-resume RM family → a stall on those = unbounded host wedge (the un-armed twin of A6). Entry set provably closed (2 RM bootstrap families). | **A12** (complete GSP-bootstrap funnel — design-of-record, pending impl; extends A6 bounded-wait + A10-v2 discriminator over all entries). Host-wedge closeable; sole residual = bounded recovery latency (closed-RM, upstream). | **OPEN** (design approved 2026-06-04) | Stall an init reached via a NON-`/dev/nvidia0` entry (`dev_get`/resume) |
 
 ### Layer 2 — Driver-internal cascade (cross-module)
 
@@ -124,15 +128,19 @@ Every `F<NN>-<slug>.md` has:
 | C3 gpu-lost-retry | F1 |
 | C4 err-handlers-scaffold | F2 |
 | C5 crash-safety (v3+v4) | F1, F3, F4, F9, F15, F16, F17, F18, F19 (Follow-up F1), F20, F24, F25, F26 (partial), F28, F39 (UVM extension), F40 (out-of-scope coverage class — documented boundary) |
+| C6 cond-acquire-rwlock-fix | **[F45]** prerequisite — corrects the inverted stock `os_cond_acquire_rwlock_{read,write}` (rwsem trylock returns 1=acquired, opposite of `down_trylock`; the `!` was missing) so `API_LOCK_FLAGS_COND_ACQUIRE` is truthfully non-blocking. Latent in stock + the deployed set (no COND consumer) but would corrupt any F44/F45 COND fix. Applies FIRST in the manifest. |
 | E1 egpu-detection | F7, F33 (transport tag) |
 | A1 pcie-primitives | *(substrate — F2, F4, F6, F12, F32 cite indirectly)* |
 | A2 bus-loss-watchdog | F4, F5, F9, F11, F22, F32, F33 |
 | A3 recovery | F2, F6, F10, F23, F27, F34, F38 |
 | A4 close-path-telemetry | F11, F12, F13, F26 (partial), F33 (disconnect-reason), F34 (burst-detection), F36 (cluster surface), F37 (cluster surface), F40 (close-path bounding telemetry that surfaced the wedge) |
 | A5 version-and-toggles | *(substrate — observability surface for A2/A3/A4)* |
-| A6 f40b-bounded-wait-open | F40 **open arm** (`RmInitAdapter` GSP-lockdown wedge — confirmed mechanism: `kgspBootstrap_GH100 → gpuTimeoutCondWait(_kgspLockdownReleasedOrFmcError)`, the GSP never releases lockdown on a userspace-recovered chip). Bounds the wait → deterministic `-EIO`. **Coverage boundary (patch property, NOT a failure mode):** does NOT cover the *first* open of a bind — its gate `nv->is_external_gpu` is set lazily inside that open's `RmInitAdapter` (`osinit.c:1301`); a re-probe/rebind onto a bad chip makes the wedge the unguarded first open. **Also relates to F42:** the leaked open-path worker has no `flush_work` guard → UAF if rebind/rmmod races it; the A9 first-open fix broadens that window. |
-| A7 f40b-bounded-wait-shutdown | F40 **shutdown arm** (`rm_shutdown_adapter` ~600 ms GSP-unload RPC — not a hang). Same `is_external_gpu` first-open coverage boundary as A6. **Defends [F42]** — the SH-3 `flush_work` guard joins the leaked shutdown worker before teardown, preventing the leaked-worker UAF (A6 has no such guard). |
-| A8 f40b-sysfs-observability | F40 (observability surface, not a defense): `tb_egpu_state`, `tb_egpu_is_external`, `tb_egpu_f40b_fires`, recovery counters. `tb_egpu_is_external` makes the A6/A7 first-open coverage boundary observable. |
+| A6 f40b-bounded-wait-open | **F40** (`RmInitAdapter` GSP-lockdown wedge — confirmed mechanism: `kgspBootstrap_GH100 → gpuTimeoutCondWait(_kgspLockdownReleasedOrFmcError)`, the GSP never releases lockdown on a userspace-recovered chip). Bounds the wait → deterministic `-EIO`. **Coverage boundary (patch property, NOT a failure mode):** does NOT cover the *first* open of a bind — its gate `nv->is_external_gpu` is set lazily inside that open's `RmInitAdapter` (`osinit.c:1301`); a re-probe/rebind onto a bad chip makes the wedge the unguarded first open. **Also relates to F42:** the leaked open-path worker has no `flush_work` guard → UAF if rebind/rmmod races it; the A9 first-open fix broadens that window. |
+| A7 f40b-bounded-wait-shutdown | **[F43]** (`rm_shutdown_adapter` ~600 ms GSP-unload RPC latency — not a hang; budget `NVreg_TbEgpuShutdownTimeoutMs=1200` accommodates it). Same `is_external_gpu` first-open coverage boundary as A6. **Defends [F42]** — the SH-3 `flush_work` guard joins the leaked shutdown worker before teardown, preventing the leaked-worker UAF (A6 has no such guard). |
+| A8 f40b-sysfs-observability | F40/F43 (observability surface, not a defense): `tb_egpu_state`, `tb_egpu_is_external`, `tb_egpu_f40b_fires`, recovery counters. `tb_egpu_is_external` makes the A6/A7 first-open coverage boundary observable. |
+| A9 egpu-probe-classify | **F40** first-open coverage close — sets `is_external_gpu` at probe time so A6/A7 guard the *first* open of a bind (was lazily set inside `RmInitAdapter`, `osinit.c:1301`). Closes the rebind/re-probe wedge boundary. *Widens* [F42] (every first-open now dispatches a leakable worker → R0 `flush_work` join). |
+| A10 f40b-lockfree-sink | **[F44]** lock-inversion deadlock — sets the lock-free `os_pci_set_disconnected` marker in the A6/A7 timeout branch BEFORE `rm_cleanup`, so the GSP-lockdown-poll worker self-terminates via `osIsGpuBusDead` (independent of the API lock the worker holds) → A6's `-EIO` restored on the WPR2-clear substrate. + C1 (`rm_cleanup` `COND_ACQUIRE`) + C3 (AER `error_detected` non-blocking). Fires ONLY on the A6/A7 *timeout* ⇒ zero regression to the WPR2-fast-fail path (R2–R4). |
+| A11 f45-deadlock-breaker | **[F45]** cold-bringup deadlock — D1 (lock-free): a failed-open already-lost eGPU reports `NV_ERR_GPU_IS_LOST` without the `rm_get_adapter_status_external` round-trip; A11: `is_external_gpu`-gated `COND_ACQUIRE` in `rm_get_adapter_status` for the contended case → the single-threaded deferred-open worker never parks on `g_RmApiLock`, so `open_complete` + the pciehp `open_q` flush always drain. Depends on C6. Deployed apnex.27. |
 
 ## Patches → out-of-scope cases (operator/cluster/kernel paths)
 
@@ -147,7 +155,7 @@ Every `F<NN>-<slug>.md` has:
 | F36 | NVIDIA Device Plugin cluster-aware enhancement (consume A4 telemetry surface) |
 | F37 | NVIDIA Device Plugin fast-fail enhancement (consume A4 persistent-kill marker) |
 | F38 | Operator-driven `setpci` SBR-toggle for bus-level reset (per-board recipe) |
-| F40 | Persistence-mode engagement immediately after `modprobe nvidia` (verified n=2 2026-05-28); injector container entrypoint + `tools/fix-bar1.sh --bind` already do this. **Driver-side fix landed (A6/A7 = F40b):** bounded-wait wrappers on both arms → deterministic `-EIO` instead of wedge (open-arm mechanism confirmed = GSP lockdown-release wait). **Remaining coverage boundary:** A6/A7 gate on the lazily-set `is_external_gpu`, so they do NOT guard the *first* open of a bind — a re-probe/rebind onto a bad chip still wedges; fix candidate = classify at probe time. Persistence-mode engagement stays the operational mitigation (keeps `usage_count>0` so LAST-CLOSE never enters the wedge-prone re-init). |
+| F40 | Persistence-mode engagement immediately after `modprobe nvidia` (verified n=2 2026-05-28); injector container entrypoint + `tools/fix-bar1.sh --bind` already do this. **Driver-side fix landed (A6 = F40b open-arm):** bounded-wait wrapper → deterministic `-EIO` instead of wedge (mechanism confirmed = GSP lockdown-release wait; Lane-2 PMU n=4). **First-open coverage boundary CLOSED by A9** (classify `is_external_gpu` at probe so A6 guards the first open of a bind too; deployed apnex.24). Persistence-mode engagement stays the operational mitigation (keeps `usage_count>0` so LAST-CLOSE never enters the wedge-prone re-init). |
 | F41 | Userspace recovery via `tools/fix-bar1.sh` (write chip ReBAR Control to max + pciehp slot cycle; verified n=2 2026-05-28) until kernel E27 patch lands on TB hot-add code path. Operator alternative: avoid TB tunnel teardown events (no cable yank, no chassis power-cycle, no boltctl deauth) and reboot-recovery if one occurs. |
 
 ## Conventions used in per-entry files
