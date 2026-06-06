@@ -67,3 +67,9 @@ The hook is ~2 lines of code added at the existing classification branch — no 
 - NVIDIA issue #461 — RTX 3060 ARM64, crash-dump RPC fn 78 `DUMP_PROTOBUF_COMPONENT` blocks 5 s waiting for dead GPU, triggers Xid 119 (cross-references F25)
 - `kernel_gsp.c` ~line 2868 (`_kgspRpcRecvPoll` fatal-timeout branch); `_kgspClassifyGspTimeout` classification helper
 - `cascade-scope-audit.md` §"Per-cluster narrative" §"Falcon/GSP cluster"
+
+**Related (root cause):** [[F47]] — the per-poll dead-bus marker coverage gap. The 2026-06-06 #292 A13
+live-FAIL showed this heartbeat/RPC timeout as the **un-terminable storm** form: on a dead bus with only
+the Linux `os_pci` marker set, `_kgspRpcRecvPoll` (honors only `PDB_PROP_GPU_IS_LOST`) never short-circuits
+→ re-storms the `done:`-label heartbeat prints. F47 is the marker-coverage root cause; this F20 timeout is
+the visible symptom. Fix = C7 (`osIsGpuBusLost` poll-reader).

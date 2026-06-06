@@ -47,3 +47,10 @@ A **host-kernel lock-inversion** (foreground+worker on `ldata_lock`/`g_RmApiLock
 - AER second-contender: `nv-pci.c` (`nv_pci_error_detected` :2931 → `rm_cleanup_gpu_lost_state` :2998, err_handler :3065-3070).
 - Defense A10 mechanism: `os_pci_set_disconnected` (os-pci.c) + `osIsGpuBusDead`/`os_pci_is_disconnected` short-circuit in `osDevReadReg032` (C5/os.c).
 - Forensics: `nvidia-driver-injector/docs/missions/mission-1-egpu-hot-plug-hot-power/wedge-2026-06-02-lockdown-reopen-forensics.md`; fix design workflow `lockdown-reopen-wedge-fix-design` (2026-06-02).
+
+**Generalised by [[F47]] (2026-06-06).** A10's `os_pci_set_disconnected` marker frees THIS lockdown poll
+(via `osIsGpuBusDead` in the MMIO reader) — but that coverage is **per-poll and accidental**. The #292 A13
+live-FAIL proved the marker is honored at only a SUBSET of GSP poll engines: a re-open that gets past the
+lockdown poll into `_kgspRpcRecvPoll` (which honors only `PDB_PROP_GPU_IS_LOST`) re-wedges. F47 = the
+per-poll coverage gap; C7 (read-only `osIsGpuBusLost` poll-reader) is the generalised fix that makes A13/A10's
+marker honored at every reachable bring-up poll-site, not just the lockdown one.
