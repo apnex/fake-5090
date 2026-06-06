@@ -1,0 +1,35 @@
+failure_mode: F18
+slug: osinit-rmshutdown-isexternal-gotcha
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  is_external_gpu_polarity_matrix:
+    # F18 is the audit-gotcha: `is_external_gpu ||` short-circuits the funnel
+    # for non-external GPUs unless the polarity is correctly handled.
+    - external: true   # tb-attached case
+    - external: false  # pcie-discrete case (the gotcha case)
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  osinit_2462:
+    expectation: NV_ASSERT_OR_GPU_LOST applied post-gpuStateDestroy
+trigger:
+  primitive: surprise-removal-A-during-RmShutdownAdapter
+  args:
+    iterate_is_external_polarity: true  # both true and false runs
+    fire_during: post_gpuStateDestroy
+assertions:
+  driver_observable:
+    - kernel MUST NOT panic at osinit.c:2462 in EITHER polarity
+    - funnel-acknowledgement log emitted in both polarity cases
+    - is_external_gpu polarity MUST NOT short-circuit the funnel
+  substrate_observable:
+    - RmShutdownAdapter call counter reaches expected count in both polarities
+  bounded_timing:
+    teardown_max_ms: 500
+source_f_entry: failure-modes/F18-osinit-rmshutdown-isexternal-gotcha.md

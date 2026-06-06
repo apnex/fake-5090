@@ -1,8 +1,8 @@
 # F42 — leaked bounded-wait worker UAF (worker outlives module/device teardown)
 
 **Sources (defense):** A7 (f40b-bounded-wait-shutdown — the SH-3 `flush_work` guard). **Coverage gap:** A6 (open path — no guard; see reverse-map).
-**Confidence:** hypothesis — source-audit *certain* (SH-3 4-agent gate proved the code path), defended pre-emptively, but **not observed as a crash** (the 2026-05-29 20:52 wedge was *not* this — A7 was not in that build).
-**Predecessor / related:** [F40](F40-rmshutdownadapter-incomplete-init-wedge.md) (the wedge the bounded-wait worker bounds; this is a lifecycle bug *in that bounding mechanism*), [F03](F03-cleanup-asserts-panic.md) / [F26](F26-nvidia-drm-teardown-hang.md) (teardown-path memory-safety family).
+**Confidence:** hypothesis (no crash observed), but **source-CONFIRMED** on both paths by two independent audits — SH-3 4-agent gate (shutdown path) + the R0 correctness audit 2026-05-31 (open path): the A6 open worker writes `nvlfp`/`sp` after `nvidia_open`'s `failed:` path frees them (nv.c), a UAF reachable with **zero operator action**, *widened* by A9 (every first-open now dispatches a leakable worker). **FIXED on the open path by R0** (`flush_work` leak→join, apnex.25 — mirrors A7's SH-3 guard; A6 was the documented gap, now closed). The 2026-05-29 20:52 wedge was *not* this (A7 not in that build).
+**Predecessor / related:** [F40](F40-reinit-gsp-lockdown-wedge.md) (the open-arm wedge **A6's** worker bounds) + [F43](F43-gsp-unload-rpc-latency-vs-naive-budget.md) (the shutdown-path RPC latency **A7's** worker bounds) — F42 is a lifecycle bug *in that bounding mechanism*, reachable on either path; [F03](F03-cleanup-asserts-panic.md) / [F26](F26-nvidia-drm-teardown-hang.md) (teardown-path memory-safety family).
 
 ## Symptom (driver view)
 

@@ -1,0 +1,35 @@
+failure_mode: F33
+slug: tb-signal-loss-vs-cc-pin
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: tb-attached
+  driver_state: healthy-bound
+  workload: idle
+config:
+  transport: thunderbolt
+  cc_pin_register:
+    exposed_via: substrate-debug-register
+  surprise_removal_a_submode:
+    options:
+      - signal-loss   # CC-pin stays CONNECTED; link goes down
+      - cc-pin        # CC-pin transitions to DISCONNECTED
+  a4_disconnect_reason:
+    expectation: surface populated from cc_pin_register at sink-set time
+trigger:
+  primitive: surprise-removal-A-with-submode
+  args:
+    iterate_submodes: [signal-loss, cc-pin]
+assertions:
+  driver_observable:
+    - both submodes MUST produce identical cascade behaviour (sink-set, teardown)
+    - signal-loss case: A4 disconnect-reason MUST contain "signal_loss"
+    - cc-pin case: A4 disconnect-reason MUST contain "cc_pin"
+    - E1 transport-class MUST be "thunderbolt" before disconnect-reason read
+  substrate_observable:
+    - cc_pin_register state matches the submode's expected value
+    - A4 reads cc_pin_register exactly once (at sink-set time)
+  bounded_timing:
+    detection_max_ms: 1250
+    teardown_max_ms: 1000
+source_f_entry: failure-modes/F33-tb-signal-loss-vs-cc-pin.md

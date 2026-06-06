@@ -1,0 +1,34 @@
+failure_mode: F01
+slug: single-read-commit
+reproducibility: substrate-v1
+substrate_phase: 1
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle  # any MMIO-touching path will trigger; idle keeps it deterministic
+config:
+  bar0:
+    state: healthy
+    behaviour: returns-real-values
+  config_space:
+    transient_blip:
+      enabled: true
+      duration_us: 50         # short enough that retry would catch it
+      blip_returns: 0xFFFFFFFF
+      target_registers: [vendor_id, device_id]  # the commit-points
+trigger:
+  primitive: config-space-transient-blip
+  args:
+    fire_on_next: vendor_id_read
+    persist_after_blip: false  # device is healthy again after the blip
+assertions:
+  driver_observable:
+    - dmesg MUST NOT contain "GPU has fallen off the bus" after the blip clears
+    - dmesg MUST contain retry-acknowledgement log line (post-C3 patch)
+    - /sys/bus/pci/devices/<BDF>/<C3-retry-count-path> increments by 1
+  substrate_observable:
+    - substrate-side read counter for vendor_id increments by >= 2 (retry happened)
+  bounded_timing:
+    retry_window_max_ms: 100
+    detection_max_ms: 200
+source_f_entry: failure-modes/F01-single-read-commit.md

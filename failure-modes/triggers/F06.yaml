@@ -1,0 +1,36 @@
+failure_mode: F06
+slug: wpr2-stuck-cold-cold-boot
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: pre-probe  # cold-boot or post-power-cycle
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  wpr2_register:
+    initial_state: stuck-up    # WPR2 fence captured high from prior failed init
+    survives_warm_reset: true  # only cold-boot or specific reset sequence clears
+  rm_init_adapter:
+    expectation: fails on stuck WPR2 without A3 mitigation
+trigger:
+  primitive: surprise-removal-B-or-C
+  args:
+    sequence:
+      - boot-with-wpr2-stuck
+      - modprobe-nvidia
+      - observe-rm_init_adapter-failure
+      - a3-recovery-attempts-reset
+assertions:
+  driver_observable:
+    - first probe MUST fail with WPR2-stuck signature
+    - A3 recovery attempts: trigger pci_reset_function; verify WPR2 state pre/post
+    - if reset clears WPR2 -> probe SHOULD succeed on next attempt (within H1 cap)
+    - if reset does NOT clear -> A3 marks persistent within H1 attempts
+  substrate_observable:
+    - WPR2 register state readable via debug interface
+    - reset-acceptance counter increments per A3 attempt
+  bounded_timing:
+    recovery_window_max_ms: 30000  # A3 bounded retry window
+source_f_entry: failure-modes/F06-wpr2-stuck-cold-cold-boot.md

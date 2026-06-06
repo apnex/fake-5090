@@ -11,6 +11,8 @@
 
 Distinct from F3 (cleanup asserts): F4 is about *steady-state* MMIO readers on the hot/cold paths. When the bus is dead, every MMIO read returns `0xFFFFFFFF`. Unpatched readers don't recognise this as a sentinel — they treat it as a real register value, often re-read it, often kick off downstream work based on the bogus value (e.g. "interrupt status register says all 32 bits asserted, let me service every IRQ source"). This wastes CPU, fills logs, and produces false work that crosses the dead bus again, snowballing.
 
+F4 is the *MMIO-observable* dead-bus class; the forward-progress family extends into two siblings that present the same surface but resist passive detection: F22 (silent hard hang — no Xid, no AER, no sentinel return because the device is alive but wedged) and F32 (BAR1/BAR3 boundary DMA failure — completions silently dropped at the boundary). F4 is the prerequisite class; F22 and F32 are why A2's active forward-progress watchdog exists in addition to the C5 sentinel-check primitives.
+
 ## Trigger sequence
 
 1. Daemon brings device to healthy bound state; driver attaches IRQ handler and runs normal traffic.

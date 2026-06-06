@@ -1,0 +1,36 @@
+failure_mode: F26
+slug: nvidia-drm-teardown-hang
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: drm-active  # X server, Wayland compositor, or any DRM client open
+config:
+  bar0:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  nv_drm_sink_probe:
+    expectation: nv_drm_is_gpu_bus_dead wrapper short-circuits DRM bounded waits
+trigger:
+  primitive: surprise-removal-A-with-drm-client-active
+  args:
+    fire_during: drm_active_state
+assertions:
+  driver_observable:
+    - nvidia_drm deregistration MUST complete within bounded time
+    - dmesg MUST contain DRM-teardown short-circuit log line
+    - DRM client receives clean teardown signal (not indefinite hang)
+  substrate_observable:
+    - DRM-subsystem MMIO calls cease after sink-state set
+  bounded_timing:
+    drm_teardown_max_ms: 1000
+out_of_scope_notes: |
+  Requires the nv_drm_is_gpu_bus_dead wrapper in kernel-open/nvidia-drm
+  (analogous to F39's UVM-side extension). C5 v4 base covers RM-side; F26
+  is the cross-module audit-extension; not all bounded-wait sites in DRM
+  may be covered in v1.
+source_f_entry: failure-modes/F26-nvidia-drm-teardown-hang.md

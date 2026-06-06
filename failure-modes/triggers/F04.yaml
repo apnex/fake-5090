@@ -1,0 +1,34 @@
+failure_mode: F04
+slug: dead-bus-mmio-sentinel
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: nvml-poll  # ensures steady MMIO read pressure on the hot path
+config:
+  bar0:
+    state: healthy
+    behaviour: returns-real-values
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  c5_funnel:
+    expectation: os_pci_read_dword checks sink before bus access
+trigger:
+  primitive: surprise-removal-A
+  args:
+    fire_during: nvml_poll_loop
+assertions:
+  driver_observable:
+    - dmesg MUST contain "tb_egpu_qwd.*dead bus detected" (A2 watchdog) OR funnel-1 sentinel log
+    - sink-state MUST be set within bounded_timing.detection_max_ms
+    - after sink set, MMIO read count MUST drop to zero per reader
+  substrate_observable:
+    - substrate MMIO-read counter freezes after sink-set
+    - first dead-bus read latches the episode (single-event observability)
+  bounded_timing:
+    detection_max_ms: 1250  # 5 x watchdog tick at 4Hz default
+    mmio_quiesce_max_ms: 200
+source_f_entry: failure-modes/F04-dead-bus-mmio-sentinel.md

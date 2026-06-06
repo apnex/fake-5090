@@ -1,0 +1,31 @@
+failure_mode: F24
+slug: sanity-check-noise-budget
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  noise_budget:
+    max_dmesg_lines_per_episode: 50  # tunable; C5 sanity-check class enforces ceiling
+trigger:
+  primitive: surprise-removal-A
+  args:
+    fire_during: noisy_path  # paths with many NV_PRINTF sanity-check lines
+assertions:
+  driver_observable:
+    - dmesg line count for the episode MUST be <= noise_budget.max_dmesg_lines_per_episode
+    - no sanity-check NV_PRINTF storms observed
+    - each suppressed log still emits a single-emission summary
+  substrate_observable:
+    - per-site log-emission counter respects the latch (1 per episode)
+  bounded_timing:
+    episode_window_max_ms: 5000  # within which the noise ceiling applies
+source_f_entry: failure-modes/F24-sanity-check-noise-budget.md

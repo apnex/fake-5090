@@ -1,0 +1,33 @@
+failure_mode: F08
+slug: aer-internal-mask-silent-drop
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  aer:
+    capability_present: true
+    uncorrectable_mask:
+      initial: 0x00400000  # Internal Error bit masked (the F8 condition)
+      writable_by_driver: true  # C2 patch unmasks this
+  c2_expectation:
+    post_patch_mask: 0x00000000  # Internal Error unmasked after C2 init
+trigger:
+  primitive: aer-internal-error-inject
+  args:
+    error_type: uncorrectable_internal
+    pre_check: verify_mask_unmasked_post_C2
+assertions:
+  driver_observable:
+    - after driver load, AER UncMask MUST have Internal bit cleared (C2 worked)
+    - injected Internal error MUST be visible via dmesg "AER:" line
+    - error MUST NOT be silently dropped
+  substrate_observable:
+    - substrate observes C2 patch writing UncMask register
+    - injected error generates AER MSI to host
+  bounded_timing:
+    unmask_max_ms: 1000  # post-probe, within early init
+    error_visibility_max_ms: 500
+source_f_entry: failure-modes/F08-aer-internal-mask-silent-drop.md

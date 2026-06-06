@@ -1,0 +1,44 @@
+failure_mode: F32
+slug: bar1-bar3-boundary-dma
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active
+config:
+  bar0:
+    state: healthy
+  bar1:
+    size: 32GB
+    state: healthy
+  bar3:
+    size: 32MB
+    state: healthy
+  bar_layout:
+    adjacency_required: true  # F32 trigger requires BAR1 and BAR3 adjacent
+    layout_introspection: lspci -vvv -s <BDF>
+    if_not_adjacent_skip: true  # test no-ops if layout doesn't satisfy
+  dma_decoder:
+    boundary_crossing_behaviour: silent-failure
+    bar_boundary_error_counter:
+      exposed_via: substrate-debug-register
+trigger:
+  primitive: dma-boundary-crossing-descriptor
+  args:
+    descriptor_shapes:
+      - multi-page-dma-bar1-into-bar3
+      - single-page-dma-at-last-bar1-page
+assertions:
+  driver_observable:
+    - A2 Q-watchdog detects stall (same as F22 surface)
+    - dmesg MUST contain forward-progress-stall log
+    - sink-state set; cascade runs
+    - 'A4 telemetry MUST report bar-boundary-dma-error-count >= 1'
+  substrate_observable:
+    - bar_boundary_error_counter increments per crossing descriptor
+    - completion counter does NOT advance for boundary descriptors
+  bounded_timing:
+    detection_max_ms: 1250
+    teardown_max_ms: 1000
+source_f_entry: failure-modes/F32-bar1-bar3-boundary-dma.md

@@ -1,0 +1,32 @@
+failure_mode: F11
+slug: observer-induced-failure
+reproducibility: telemetry-only
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: nvml-poll  # the observer (nvidia-smi or equivalent) IS the trigger
+config:
+  expectation: A4 telemetry surface MUST exist post-patch
+  a4_paths:
+    - /sys/bus/pci/devices/<BDF>/<A4-close-state-path>
+    - /sys/bus/pci/devices/<BDF>/<A4-last-state-change-timestamp-path>
+trigger:
+  primitive: telemetry-surface-presence-check
+  args:
+    cycle_observer: nvidia-smi
+    cycle_interval_s: 17  # the canonical observer-induced cycle
+assertions:
+  driver_observable:
+    - all A4 sysfs paths MUST exist and be parseable
+    - paths MUST be readable by non-root user
+    - reading paths MUST NOT itself trigger MMIO accesses
+  substrate_observable:
+    - substrate MMIO read counter MUST NOT increment from sysfs reads alone
+  bounded_timing:
+    surface_present_max_ms: 5000  # post-probe, surface should be up
+out_of_scope_notes: |
+  F11 is not reproducible as a failure-trigger in substrate — the failure
+  IS the observer cycle on real hardware. Substrate side asserts only that
+  the A4 surface exists and is non-stimulating (reading it doesn't cause MMIO).
+source_f_entry: failure-modes/F11-observer-induced-failure.md

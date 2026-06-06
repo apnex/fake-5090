@@ -1,0 +1,36 @@
+failure_mode: F25
+slug: dump-rpc-self-dos
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  rpc_engine:
+    accepts_dump_protobuf_component_fn78: true
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  c5_v4_dump_rpc_funnel:
+    expectation: DUMP_PROTOBUF_COMPONENT fn 78 short-circuits on sink-state
+trigger:
+  primitive: surprise-removal-A-then-crash-dump
+  args:
+    sequence:
+      - fire-surprise-removal-A
+      - driver triggers crash-dump path (DUMP_PROTOBUF_COMPONENT fn 78)
+      - measure RPC wait time
+assertions:
+  driver_observable:
+    - crash-dump RPC MUST return error immediately (not block 5s on dead GPU)
+    - dmesg MUST contain funnel-acknowledgement at dump-RPC site
+    - cleanup proceeds without 5s self-DoS
+  substrate_observable:
+    - DUMP_PROTOBUF_COMPONENT RPC submission counter at most 1 (then short-circuited)
+  bounded_timing:
+    dump_rpc_max_ms: 500  # pre-patch: 5000; post-patch: <500
+source_f_entry: failure-modes/F25-dump-rpc-self-dos.md

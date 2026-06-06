@@ -1,0 +1,40 @@
+failure_mode: F22
+slug: silent-hard-hang-no-signal
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active  # workload must be in flight for hang to manifest
+config:
+  bar0:
+    state: healthy
+    behaviour: returns-real-values  # the silent-wedge distinction
+  dma_engine:
+    state: wedged
+    behaviour: accepts-submissions-completions-never-fire
+  aer:
+    no_error_raised: true  # F22 distinction: no AER signal
+  xid_emission:
+    none_expected: true  # F22 distinction: no Xid
+  forward_progress_counter:
+    expectation: freezes; A2 watchdog detects via counter-delta
+trigger:
+  primitive: silent-wedge-without-signal
+  args:
+    fire_during: active_dma_workload
+assertions:
+  driver_observable:
+    - 'dmesg MUST NOT contain any "NVRM: Xid" line during wedge'
+    - dmesg MUST NOT contain "AER:" line during wedge
+    - A2 Q-watchdog forward-progress check MUST detect stall
+    - dmesg MUST contain forward-progress-stall log line
+    - sink-state set; cascade runs to completion
+  substrate_observable:
+    - DMA-submission counter increments; completion counter does NOT
+    - no AER MSI raised to host
+    - watchdog observes counter-delta == 0 across threshold window
+  bounded_timing:
+    detection_max_ms: 1250
+    teardown_max_ms: 1000
+source_f_entry: failure-modes/F22-silent-hard-hang-no-signal.md

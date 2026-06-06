@@ -1,0 +1,32 @@
+failure_mode: F02
+slug: no-error-handlers
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  aer:
+    capability_present: true
+    uncorrectable_mask: 0x00000000  # nothing masked
+  pcie_error_handlers:
+    expectation: registered  # post-C4-patch the driver MUST have err_handlers
+trigger:
+  primitive: aer-fatal-inject
+  args:
+    error_type: uncorrectable_fatal
+    error_source: completion_timeout
+assertions:
+  driver_observable:
+    - dmesg MUST contain "nvidia 0000:<BDF>: AER:"
+    - dmesg MUST contain ".error_detected called" (post-C4 dispatch trace)
+    - dmesg MUST NOT contain "no error handlers registered, panic"
+    - pcie_do_recovery proceeds to slot_reset (do NOT abort at handler-lookup)
+  substrate_observable:
+    - substrate AER injection acknowledged
+    - substrate sees slot-reset request on the bus
+  bounded_timing:
+    dispatch_max_ms: 500
+out_of_scope_notes: pre-C4 baseline (no err_handlers) is the regression-witness; both paths must be tested
+source_f_entry: failure-modes/F02-no-error-handlers.md

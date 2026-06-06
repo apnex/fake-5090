@@ -1,0 +1,27 @@
+failure_mode: F29
+slug: allocator-retry-asymmetry
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: kernel-class-only
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: real-5090 + real-tb-or-usb4-host
+    required_conditions:
+      - cold-boot without device attached
+      - hot-plug attach the 5090 (32GB BAR1 stress)
+      - kernel allocator runs hot-plug retry (fewer retries than cold-boot)
+assertions:
+  operator_observable:
+    - 'real-hw: BAR1 unassigned post-hot-plug visible via lspci -vvv'
+    - mitigation: kernel cmdline 'pci=realloc=on' forces full retry sequence
+out_of_scope_notes: |
+  PCIe allocator retry asymmetry is kernel-side. Substrate exposes BAR-
+  requirement profile but cannot drive the kernel's allocator hot-plug
+  retry budget. Operator mitigation via kernel cmdline; documented for
+  triage cross-ref with F30/F31 (sibling kernel-class issues).
+source_f_entry: failure-modes/F29-allocator-retry-asymmetry.md

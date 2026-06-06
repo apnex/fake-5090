@@ -1,0 +1,34 @@
+failure_mode: F16
+slug: issue-rpc-and-wait-large-bypass
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  rpc_engine:
+    accepts_large_rpc: true
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  audit_gate:
+    expectation: _issueRpcAndWaitLarge funnels GPU_IS_LOST before chunk loop
+trigger:
+  primitive: surprise-removal-A-during-large-rpc
+  args:
+    rpc_size: multi-chunk  # large enough to exercise the chunked path
+    fire_during: chunk-loop-iteration
+assertions:
+  driver_observable:
+    - large RPC MUST short-circuit on first GPU_IS_LOST check after dead-bus
+    - dmesg MUST contain funnel-acknowledgement at _issueRpcAndWaitLarge
+    - subsequent chunks MUST NOT be issued
+  substrate_observable:
+    - substrate RPC-chunk counter freezes at first chunk after sink-set
+  bounded_timing:
+    short_circuit_max_ms: 100
+source_f_entry: failure-modes/F16-issue-rpc-and-wait-large-bypass.md

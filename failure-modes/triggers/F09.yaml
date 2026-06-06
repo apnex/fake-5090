@@ -1,0 +1,36 @@
+failure_mode: F09
+slug: gpulost-marker-propagation-gap
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: nvml-poll  # ensure both RM and Linux paths exercised
+config:
+  bar0:
+    state: healthy
+  surprise_removal_d:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+      race_window_us: 1   # tight A->B race
+  markers:
+    rm_internal_lost: expected_set_post_detection
+    linux_pdev_disconnected: expected_set_post_detection
+    propagation_gap_ok_window_ms: 50
+trigger:
+  primitive: surprise-removal-D
+  args:
+    race_pattern: simultaneous-mmio-and-config-failure
+    fire_count: 100  # statistical: 100 trials to expose the gap
+assertions:
+  driver_observable:
+    - both markers set within propagation_gap_ok_window_ms of each other across all trials
+    - dmesg single-emission log line per episode (A2 latch contract)
+    - no marker-divergence period > 50ms observed
+  substrate_observable:
+    - substrate access counters frozen on both BAR and config paths after sink
+  bounded_timing:
+    marker_sync_max_ms: 50
+    detection_max_ms: 1250
+source_f_entry: failure-modes/F09-gpulost-marker-propagation-gap.md

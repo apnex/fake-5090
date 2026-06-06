@@ -1,0 +1,31 @@
+failure_mode: F13
+slug: uvm-close-misattributed
+reproducibility: telemetry-only
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: uvm-active
+config:
+  expectation: A4 UVM close-path marker emission (instrumentation only)
+trigger:
+  primitive: uvm-channel-last-close
+  args:
+    sequence:
+      - cuda-uvm-app-running
+      - cuda-uvm-app-exits
+      - uvm close path runs
+assertions:
+  driver_observable:
+    - dmesg MUST contain UVM-close marker log line
+    - A4 surface MUST reflect uvm-close-event
+    - close completes normally (no wedge — F13 was misattributed; benign)
+  substrate_observable:
+    - UVM-related ioctls complete with normal latency
+  bounded_timing:
+    close_max_ms: 1000
+out_of_scope_notes: |
+  F13 was historically classified as a wedge but post-audit confirmed benign.
+  Trigger exists to assert the instrumentation (A4 marker emission) still fires
+  on the close path so future regressions in UVM teardown remain observable.
+source_f_entry: failure-modes/F13-uvm-close-misattributed.md

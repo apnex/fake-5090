@@ -1,0 +1,36 @@
+failure_mode: F10
+slug: recovery-storm
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  aer:
+    capability_present: true
+  a3:
+    NVreg_TbEgpuRecoverMaxAttempts: 3  # H1 cap
+    rate_limit_ms: 5000                # H2 minimum inter-attempt interval
+    persistent_kill_path: /sys/module/nvidia/parameters/TbEgpuRecoverEnable
+  fault_persistence: sustained  # slot_reset does NOT clear the fault state
+trigger:
+  primitive: aer-fatal-sustained
+  args:
+    error_type: uncorrectable_fatal
+    refire_on_each_recovery: true
+    max_test_attempts: 25  # exceeds H1 cap to verify gating
+assertions:
+  driver_observable:
+    - tb_egpu_recover_attempt_count MUST reach 3 (H1 cap) and stop
+    - after H1 exhaustion, dmesg MUST contain "PERMANENT_FAIL" uevent
+    - inter-attempt interval MUST be >= rate_limit_ms (H2)
+    - persistent_kill survives modprobe -r/-a cycle (H3)
+    - during in-flight recovery, second AER MUST NOT return DISCONNECT (H4)
+  substrate_observable:
+    - substrate observes exactly 3 slot_reset attempts, not 21
+    - no slot_reset within rate_limit_ms of prior attempt
+  bounded_timing:
+    total_recovery_window_max_ms: 30000  # bounded by H1*rate_limit + epsilon
+    permanent_fail_uevent_max_ms: 500
+source_f_entry: failure-modes/F10-recovery-storm.md

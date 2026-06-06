@@ -1,0 +1,49 @@
+failure_mode: F37
+slug: daemonset-respawn-loop
+reproducibility: substrate-phase3
+substrate_phase: 3
+preconditions:
+  topology: multi-device  # at least 2 GPUs to verify isolation
+  driver_state: healthy-bound  # both bound
+  workload: idle
+config:
+  gpu_a:
+    bar0: healthy
+    role: surprise-removal-victim
+  gpu_b:
+    bar0: healthy
+    role: healthy-survivor
+  surprise_removal_a:
+    fire_on: gpu_a
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  driver_query_fast_fail:
+    expectation_ms: 500  # NVML queries against dead GPU MUST fail fast
+trigger:
+  primitive: surprise-removal-A-then-plugin-style-enumeration
+  args:
+    sequence:
+      - fire-surprise-removal-A-on-gpu-a
+      - wait for cascade complete + persistent-kill
+      - simulate plugin enumeration (nvmlDeviceGetCount, GetHandleByIndex)
+      - assert per-call latency
+assertions:
+  driver_observable:
+    - nvmlDeviceGetCount returns surviving count within 500ms
+    - GetHandleByIndex for gpu_b succeeds within 100ms
+    - GetHandleByIndex for gpu_a fails fast within 100ms
+    - 'nvidia-smi -L completes within 500ms'
+    - gpu_b registration MUST succeed in plugin-style enumeration
+    - gpu_b MUST NOT fail to register because gpu_a is dead (cross-ref F19)
+  substrate_observable:
+    - no MMIO accesses against gpu_a after sink-state set
+    - gpu_b MMIO accesses continue normally
+  bounded_timing:
+    plugin_enum_total_max_ms: 2000
+out_of_scope_notes: |
+  Full F37 cluster-behaviour (Pod CrashLoopBackOff prevention, node
+  capacity update) requires real k8s cluster. Substrate-side scope:
+  fast-fail driver-query contract + multi-GPU isolation (gates on F19
+  fix landing — without F19, gpu_b may be contaminated).
+source_f_entry: failure-modes/F37-daemonset-respawn-loop.md

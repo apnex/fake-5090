@@ -1,0 +1,26 @@
+failure_mode: F14
+slug: iommu-gen3-gen4-gsp-lockdown
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: real-hardware-only
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: barlow-ridge-tb-controller + 5090
+    required_conditions:
+      - iommu_enabled: true
+      - link_retraining: gen3-to-gen4
+      - gsp_in_lockdown_window: true
+assertions:
+  operator_observable:
+    - real-hw: dmesg MUST contain GSP_LOCKDOWN cascade signature
+    - mitigation: kernel cmdline iommu=off OR aorus-egpu-bridge-link-cap LnkCtl2 bit 5 cap
+out_of_scope_notes: |
+  fake-5090 v1 substrate cannot emulate Barlow Ridge bridge silicon nor the
+  GSP firmware's lockdown state machine. F14 routes to operator procedure on
+  the apnex rig. Documented here for index completeness; no substrate fixture.
+source_f_entry: failure-modes/F14-iommu-gen3-gen4-gsp-lockdown.md

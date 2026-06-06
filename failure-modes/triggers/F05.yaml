@@ -1,0 +1,36 @@
+failure_mode: F05
+slug: modeb-dma-silent-freeze
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active  # DMA path must be live
+config:
+  bar0:
+    state: healthy
+    behaviour: returns-real-values  # MMIO still works (Mode B distinction)
+  dma_engine:
+    state: wedged
+    behaviour: accepts-submissions-completions-never-fire
+  forward_progress_counter:
+    expectation: freezes when dma_engine wedged
+trigger:
+  primitive: bar-mmio-state-transition
+  args:
+    transition: healthy -> mode-b-wedge
+    fire_during: active_dma_workload
+assertions:
+  driver_observable:
+    - passive MMIO polling MUST NOT detect the failure (registers still return sane values)
+    - A2 Q-watchdog forward-progress check MUST fire within bounded time
+    - dmesg MUST contain forward-progress-stall log line
+    - sink-state set; cascade runs
+  substrate_observable:
+    - DMA-submission counter increments
+    - DMA-completion counter does NOT increment
+    - watchdog observes counter-delta == 0 across threshold window
+  bounded_timing:
+    detection_max_ms: 1250
+    teardown_max_ms: 1000
+source_f_entry: failure-modes/F05-modeb-dma-silent-freeze.md

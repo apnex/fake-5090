@@ -9,7 +9,7 @@
 
 ## Symptom (driver view)
 
-The 2026-05-06 incident: the *first* Lever M-recover Commit 3 attempted recovery 21 times in ~9 minutes, driving the GPU into a worse state than the original fault. Root causes (per the predecessor's post-mortem):
+The 2026-05-06 incident: the *first* Lever M-recover Commit 3 attempted recovery 21 times in ~9 minutes, driving the GPU into a worse state than the original fault. F10 is the *per-failure unbounded retry* variant; the sibling F34 (spurious plug-event burst) covers the *per-burst unbounded re-enumeration* variant — same H1/H3 defence surface, different stimulus shape. Root causes (per the predecessor's post-mortem):
 
 - **No cap (H1):** no upper bound on retry attempts per fault burst.
 - **No rate-limit (H2):** no minimum interval between attempts; back-to-back retries hammered the bridge.

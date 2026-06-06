@@ -1,0 +1,32 @@
+failure_mode: F15
+slug: assert-or-gpu-lost-under-applied
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  audit_gate:
+    expectation: source-audit confirms NV_ASSERT_OR_GPU_LOST applied at all 8 sites
+trigger:
+  primitive: surprise-removal-A
+  args:
+    fire_during: each_of_8_teardown_sites
+    iterate_sites: true  # test framework iterates through all 8 sites
+assertions:
+  driver_observable:
+    - kernel MUST NOT panic at any of the 8 teardown sites
+    - each site MUST emit funnel-acknowledgement log line under GPU_IS_LOST
+    - source-audit script MUST find NV_ASSERT_OR_GPU_LOST at all 8 grep targets
+  substrate_observable:
+    - per-site call counter increments expected number of times
+  bounded_timing:
+    per_site_teardown_max_ms: 200
+source_f_entry: failure-modes/F15-assert-or-gpu-lost-under-applied.md

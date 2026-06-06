@@ -1,0 +1,36 @@
+failure_mode: F27
+slug: reset-required-loop
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  reset_behaviour_state:
+    # Substrate-side reset-outcome configuration
+    # R0: function-reset clears, device healthy after
+    # R1: function-reset clears, device dead again immediately
+    # R2: function-reset reports success, device unchanged (lying reset)
+    # R3: function-reset accepted, device persistently dead
+    selected_state: R3  # persistent-dead is the F27 case
+  a3:
+    NVreg_TbEgpuRecoverMaxAttempts: 3
+trigger:
+  primitive: surprise-removal-A-with-reset-state-R3
+  args:
+    fire_then_observe_reset_loop: true
+assertions:
+  driver_observable:
+    - A3 attempts reset; substrate accepts; device re-enters lost state
+    - A3 attempts H1 cap (3) times then marks persistent
+    - dmesg MUST contain "PERMANENT_FAIL" uevent after exhaustion
+    - subsequent triggers MUST be rejected by persistent marker
+  substrate_observable:
+    - substrate observes exactly 3 pci_reset_function invocations
+    - each reset is acknowledged; device-state remains R3 throughout
+  bounded_timing:
+    bounded_retry_window_max_ms: 30000
+source_f_entry: failure-modes/F27-reset-required-loop.md

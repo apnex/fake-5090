@@ -1,0 +1,35 @@
+failure_mode: F17
+slug: kfsp-arithmetic-invariant-dead-bus
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle  # any path that touches kfsp during teardown
+config:
+  bar0:
+    state: healthy
+  fsp_emem:
+    state: healthy
+    behaviour: returns-real-values
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF  # includes EMEM reads
+      remove_uevent_fires: false
+  c5_v4_g9_expectation:
+    funnel_site: kfsp_arithmetic_invariant_check
+    behaviour: returns_GPU_IS_LOST_before_arithmetic
+trigger:
+  primitive: surprise-removal-A-during-kfsp-call
+  args:
+    fire_during: kfsp_invariant_evaluation
+assertions:
+  driver_observable:
+    - kfsp invariant check MUST NOT trigger BUG_ON or arithmetic panic
+    - funnel returns GPU_IS_LOST before arithmetic
+    - dmesg MUST contain funnel-acknowledgement at kfsp site
+  substrate_observable:
+    - EMEM read counter increments at most once before sink-check
+  bounded_timing:
+    short_circuit_max_ms: 100
+source_f_entry: failure-modes/F17-kfsp-arithmetic-invariant-dead-bus.md

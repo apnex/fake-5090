@@ -1,0 +1,37 @@
+failure_mode: F39
+slug: xid154-compute-disconnect-race
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: uvm-active  # critical: UVM channels must be active
+config:
+  bar0:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  uvm_channel_counters:
+    per_channel_dma_cancel: substrate-exposed
+    per_channel_resource_teardown: substrate-exposed
+  uvm_sink_probe:
+    expectation: nv_uvm_is_gpu_bus_dead wrapper short-circuits UVM bounded waits
+trigger:
+  primitive: surprise-removal-A-with-uvm-channels-active
+  args:
+    uvm_channel_count: 4  # multiple channels to stress per-channel teardown
+    fire_during: active_cuda_kernel_using_managed_memory
+assertions:
+  driver_observable:
+    - 'dmesg MUST contain "NVRM: Xid (PCI:<BDF>): 79" (or 119) at T0'
+    - 'dmesg MUST contain "NVRM: Xid (PCI:<BDF>): 154" within 1s of Xid 79'
+    - 'cudaStreamSynchronize MUST fail with CUDA error after Xid 154'
+  substrate_observable:
+    - per-channel DMA-cancel counters reach final values within 500ms
+    - per-channel resource-teardown counters reach final values within 500ms
+  bounded_timing:
+    xid154_after_xid79_max_ms: 1000  # post-patch target; pre-patch was 5000-30000
+    teardown_max_ms: 1000
+source_f_entry: failure-modes/F39-xid154-compute-disconnect-race.md

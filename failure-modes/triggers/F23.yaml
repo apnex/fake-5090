@@ -1,0 +1,32 @@
+failure_mode: F23
+slug: instant-xid79-cold-boot
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: cold-boot
+  workload: idle  # no workload yet; eGPU never reaches usable state
+config:
+  bar0:
+    state: dead-at-cold-boot  # the F23 condition
+    behaviour: returns-0xFFFFFFFF-immediately-after-probe
+  topology_surprise:
+    cold_boot_dead_chip: true
+trigger:
+  primitive: topology-surprise-cold-boot-dead
+  args:
+    fire_during: rm_init_adapter
+    persist_after_reset: true  # F23 chips are genuinely broken; reset doesn't recover
+assertions:
+  driver_observable:
+    - 'dmesg MUST contain "NVRM: Xid (PCI:<BDF>): 79" within bounded time of probe'
+    - A3 bounded retry: 3 attempts then persistent-kill
+    - dmesg MUST contain "PERMANENT_FAIL" uevent after H1 cap exhausted
+    - subsequent probe attempts MUST be rejected by persistent marker
+  substrate_observable:
+    - substrate observes exactly 3 reset attempts, each followed by re-probe
+    - persistent-kill marker survives modprobe -r/-a cycle
+  bounded_timing:
+    first_xid79_max_ms: 5000  # from probe start
+    bounded_retry_window_max_ms: 30000
+source_f_entry: failure-modes/F23-instant-xid79-cold-boot.md

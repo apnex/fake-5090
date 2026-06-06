@@ -1,0 +1,34 @@
+failure_mode: F20
+slug: gsp-heartbeat-rpc-timeout
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy  # MMIO works; GSP is what's wedged
+  gsp_firmware:
+    state: wedged
+    behaviour: accepts-rpc-never-responds
+  heartbeat_register:
+    expectation: stops advancing when GSP wedged
+trigger:
+  primitive: gsp-firmware-wedge
+  args:
+    fire_during: idle_or_active
+    heartbeat_freeze_immediate: true
+assertions:
+  driver_observable:
+    - 'dmesg MUST contain "NVRM: Xid (PCI:<BDF>): 119" (GSP RPC timeout)'
+    - GSP heartbeat watchdog MUST fire within bounded time
+    - cascade runs (sink-state, teardown, etc.)
+  substrate_observable:
+    - RPC submission counter increments
+    - RPC completion counter does NOT increment
+    - heartbeat register read by host; value frozen
+  bounded_timing:
+    xid119_emission_max_ms: 10000  # GSP timeout window varies; bounded by config
+    cascade_complete_max_ms: 1000
+source_f_entry: failure-modes/F20-gsp-heartbeat-rpc-timeout.md

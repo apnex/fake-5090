@@ -1,0 +1,25 @@
+failure_mode: F21
+slug: gsp-firmware-internal-halt-xid8
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: real-hardware-only
+  driver_state: n/a
+  workload: real-hw-sustained-inference
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: real-5090-or-equivalent-blackwell
+    required_conditions:
+      - workload: sustained-inference-multi-hour
+      - gsp_firmware_state: internal-scheduler-halt
+assertions:
+  operator_observable:
+    - 'real-hw: dmesg MUST contain "NVRM: Xid (PCI:<BDF>): 8"'
+    - mitigation pathway: A3-extension future work; no current injector lever
+out_of_scope_notes: |
+  GSP firmware-internal halt under sustained load (Xid 8) is a firmware-level
+  scheduler hang. fake-5090 cannot emulate firmware-internal state machines.
+  Community evidence only; documented in failure-mode index for triage cross-ref.
+source_f_entry: failure-modes/F21-gsp-firmware-internal-halt-xid8.md

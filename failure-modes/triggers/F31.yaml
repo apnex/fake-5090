@@ -1,0 +1,26 @@
+failure_mode: F31
+slug: boot-time-bar-failure
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: firmware-kernel-class-only
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: real-system with conservative UEFI resource map + 5090
+    required_conditions:
+      - GPU physically attached at cold-boot
+      - firmware resource-map too tight for 5090 BAR1
+      - cold-boot enumeration fails to assign BAR
+assertions:
+  operator_observable:
+    - 'cold-boot dmesg MUST contain "PCI: failed to assign Mem-Pref" before nvidia.ko loads'
+    - 'mitigation: UEFI Above-4G-Decoding / Resizable-BAR / kernel pci=use_crs or pci=nocrs'
+out_of_scope_notes: |
+  Firmware resource-map state cannot be substrate-emulated. F31 differs from
+  F29/F30 in timing: F31 fires at cold-boot, F29/F30 fire at hot-plug. Same
+  driver-visible symptom; distinct mitigation per cause.
+source_f_entry: failure-modes/F31-boot-time-bar-failure.md

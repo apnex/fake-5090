@@ -1,0 +1,42 @@
+failure_mode: F36
+slug: cluster-consumer-holders
+reproducibility: cluster-only
+substrate_phase: 2  # substrate provides the lost-state surface; cluster consumes
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active  # workload Pod holds nvidia.com/gpu allocation
+config:
+  bar0:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  a4_cluster_surface:
+    paths:
+      - /sys/bus/pci/devices/<BDF>/<A4-persistent-kill-path>
+      - /sys/bus/pci/devices/<BDF>/<A4-last-state-change-timestamp-path>
+      - /sys/bus/pci/devices/<BDF>/<A4-disconnect-reason-path>
+    readable_by_non_root: true
+    values_stable_for_min_s: 60
+trigger:
+  primitive: surprise-removal-A-then-cluster-observation
+  args:
+    fire_then_observe: a4_surface_only  # substrate-side scope of F36
+assertions:
+  driver_observable:
+    - cascade completes; sink-state set; A3 marks persistent
+    - all a4_cluster_surface paths MUST exist and be parseable post-cascade
+    - paths MUST remain stable for >= 60s
+  substrate_observable:
+    - lost-state condition reproducible via surprise-removal-A primitive
+  bounded_timing:
+    surface_populated_max_ms: 2000
+out_of_scope_notes: |
+  Full F36 cluster-behaviour (Pod eviction, drain success) requires a real
+  k8s cluster with NVIDIA Device Plugin + custom watchdog DaemonSet consuming
+  A4's surface. fake-5090 v1 asserts only the substrate-side contract:
+  A4 surface exists, is parseable, is stable. Cluster-layer integration
+  test lives in a separate harness (not in fake-5090).
+source_f_entry: failure-modes/F36-cluster-consumer-holders.md

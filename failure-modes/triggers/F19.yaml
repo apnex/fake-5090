@@ -1,0 +1,41 @@
+failure_mode: F19
+slug: nvgpuops-reportfatal-system-global
+reproducibility: substrate-phase3
+substrate_phase: 3
+preconditions:
+  topology: multi-device  # at least 2 GPUs to demonstrate contamination
+  driver_state: healthy-bound  # both GPUs bound
+  workload: cuda-active  # both GPUs running workloads
+config:
+  gpu_a:
+    bar0: healthy
+    role: surprise-removal-victim
+  gpu_b:
+    bar0: healthy
+    role: innocent-bystander
+    expectation: MUST remain functional after gpu_a dies
+  nvGpuOpsReportFatalError:
+    pre_patch_behaviour: sets-system-global-flag (contaminates gpu_b)
+    post_patch_behaviour: per-gpu-scoped-flag (gpu_b unaffected)
+trigger:
+  primitive: surprise-removal-A-on-gpu-a-only
+  args:
+    fire_on: gpu_a
+    gpu_b_workload: continues_throughout
+assertions:
+  driver_observable:
+    - gpu_a MUST enter sink-state; cascade runs to completion
+    - gpu_b MUST NOT receive Xid 154 during gpu_a's cascade
+    - gpu_b CUDA workload MUST continue to produce correct results
+    - dmesg per-GPU isolation: gpu_a log lines mention gpu_a only
+  substrate_observable:
+    - gpu_b MMIO/DMA counters continue incrementing across the gpu_a event
+    - no global-flag-write observed by substrate's debug interface
+  bounded_timing:
+    gpu_a_teardown_max_ms: 1000
+    gpu_b_recovery_window_max_ms: 0  # gpu_b should not need recovery
+out_of_scope_notes: |
+  Requires Phase 3 multi-device substrate. F19 documents a Follow-up F1
+  item (out of scope for C5 v4 base patch) — the system-global flag is the
+  current behaviour; this trigger asserts the post-F1 per-GPU-scoped contract.
+source_f_entry: failure-modes/F19-nvgpuops-reportfatal-system-global.md

@@ -1,0 +1,28 @@
+failure_mode: F30
+slug: bridge-window-stickiness
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: bridge-class-only
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: real-tb-controller with under-sized cold-boot windows + 5090
+    required_conditions:
+      - cold-boot without 5090 attached
+      - TB downstream-port windows sized for typical devices (< 32GB)
+      - hot-plug attach the 5090
+      - bridge window resize attempt fails (parent has no headroom)
+assertions:
+  operator_observable:
+    - 'real-hw: BAR1 unassigned visible via lspci -vvv -s <BDF>'
+    - 'mitigation: kernel cmdline pci=hpmemsize=64G OR per-board setpci pre-sizing'
+out_of_scope_notes: |
+  Bridge-window state lives on bridge silicon. Substrate cannot model
+  cold-boot window pre-sizing nor bridge-hierarchy resize negotiation.
+  Sibling to F29 (allocator retry) and F31 (cold-boot allocation failure);
+  three distinct kernel-class causes for the same driver-visible symptom.
+source_f_entry: failure-modes/F30-bridge-window-stickiness.md

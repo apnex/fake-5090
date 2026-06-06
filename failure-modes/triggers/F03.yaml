@@ -1,0 +1,33 @@
+failure_mode: F03
+slug: cleanup-asserts-panic
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: idle
+config:
+  bar0:
+    state: healthy
+  bar1:
+    state: healthy
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      config_returns: 0xFFFFFFFF
+      remove_uevent_fires: false  # silent dead-bus, no .remove() callback
+trigger:
+  primitive: surprise-removal-A
+  args:
+    fire_during: cleanup_path  # crash-dump / RPC / resserv teardown
+assertions:
+  driver_observable:
+    - kernel MUST NOT panic (no BUG_ON, no oops trace)
+    - dmesg MUST contain GPU_IS_LOST funnel-acknowledgement at cleanup call sites
+    - cleanup proceeds to completion (sink-state set; teardown finishes)
+  substrate_observable:
+    - substrate-side cleanup-call counter at the funneled sites reaches expected count
+    - no further bus accesses after sink-state set
+  bounded_timing:
+    cleanup_max_ms: 1000
+source_f_entry: failure-modes/F03-cleanup-asserts-panic.md

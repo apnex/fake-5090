@@ -1,0 +1,37 @@
+failure_mode: F28
+slug: client-count-warn-cascade
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active  # multiple FDs to /dev/nvidia0
+config:
+  bar0:
+    state: healthy
+  active_client_fds: 4  # multiple consumers; close-path WARN_ON cascade if unguarded
+  surprise_removal_a:
+    on_trigger:
+      mmio_returns: 0xFFFFFFFF
+      remove_uevent_fires: false
+  c5_v4_close_path_funnel:
+    expectation: nv_close_device WARN_ON guarded by sink check
+trigger:
+  primitive: surprise-removal-A-then-client-close-cascade
+  args:
+    sequence:
+      - fire-surprise-removal-A
+      - all 4 clients close their FDs in rapid succession
+      - measure WARN_ON occurrences
+assertions:
+  driver_observable:
+    - dmesg WARN_ON count for nv_close_device MUST be 0 across all 4 closes
+    - each close path completes within bounded time
+    - dmesg MUST contain single funnel-acknowledgement per close site (not per close)
+  substrate_observable:
+    - close-path call counter increments 4 times (one per FD)
+    - no MMIO accesses on the close path after sink-state set
+  bounded_timing:
+    per_close_max_ms: 500
+    total_cascade_max_ms: 2000
+source_f_entry: failure-modes/F28-client-count-warn-cascade.md

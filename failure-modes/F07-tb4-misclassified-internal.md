@@ -56,7 +56,7 @@ For each topology variant (TB4, TB3, OCP-external, PCH-internal), after probe:
 ## fake-5090 mechanism mapping
 
 - **Phase 2 topology modelling.** Requires the daemon to construct a multi-device vfio-user topology (host bridge → TB controller → device, or host bridge → root port → device) and present the appropriate capability bits / sysfs hints so the kernel's `pci_is_thunderbolt_attached()` returns true.
-- Of the 14 failure modes, F7 is the topology-purity test — it doesn't need MMIO, AER, or BAR work, only correct enumeration and bridge attribute presentation.
+- Of the 39 failure modes, F7 is the topology-purity test — it doesn't need MMIO, AER, or BAR work, only correct enumeration and bridge attribute presentation. Within Layer 5 (bus / transport / hot-plug), F7 is the lightest-weight transport-classification fixture; the heavier transport-class siblings (F33 signal-loss vs CC-pin, F34 plug-event burst) reuse the same topology scaffolding.
 - Can be the *first* phase-2 fixture: minimal cognitive load on the rest of the device model.
 
 ## Source citations

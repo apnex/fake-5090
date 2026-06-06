@@ -1,0 +1,39 @@
+failure_mode: F34
+slug: spurious-plug-event-burst
+reproducibility: substrate-v1
+substrate_phase: 3  # requires substrate participation in host hot-plug framework
+preconditions:
+  topology: tb-attached
+  driver_state: healthy-bound
+  workload: idle
+config:
+  transport: thunderbolt
+  burst_primitive:
+    enabled: true
+  a3:
+    NVreg_TbEgpuRecoverMaxAttempts: 3
+  a4_burst_detection:
+    threshold_event_count: 5
+    threshold_window_ms: 1000
+trigger:
+  primitive: hot-plug-event-burst
+  args:
+    burst_shapes:
+      - {event_count: 5,  inter_event_ms: 10,  jitter_ms: 0}    # fast: under kernel debounce
+      - {event_count: 10, inter_event_ms: 200, jitter_ms: 50}   # slow: each passes debounce
+assertions:
+  driver_observable:
+    - A3 attempts capped at 3 across the burst (H1)
+    - A3 marks persistent after 3rd failed re-enumeration
+    - subsequent burst events MUST NOT re-trigger rm_init_adapter
+    - 'A4 burst-detection sysfs MUST report event_count and window timestamps'
+  substrate_observable:
+    - substrate emitted the configured event sequence
+    - A4 burst-counter increments per event received
+  bounded_timing:
+    total_burst_settled_max_ms: 30000
+out_of_scope_notes: |
+  Substrate must participate in the host hot-plug enumeration framework
+  (Phase 3). v1 substrate cannot emit hot-plug events through the host's
+  TB-subsystem; this fixture is gated on Phase 3 availability.
+source_f_entry: failure-modes/F34-spurious-plug-event-burst.md

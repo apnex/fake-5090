@@ -1,0 +1,34 @@
+failure_mode: F12
+slug: dev-nvidia0-close-wedge
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: single-device
+  driver_state: healthy-bound
+  workload: cuda-active  # holds /dev/nvidia0 open
+config:
+  bar0:
+    state: healthy
+  wpr2_register:
+    captured_on_last_close: true  # the F12 mechanism
+  close_path:
+    expectation: WPR2 state captured to A4 surface BEFORE deref
+trigger:
+  primitive: last-close-with-wpr2-captured
+  args:
+    sequence:
+      - cuda-app-running
+      - cuda-app-exits (last close on /dev/nvidia0)
+      - driver runs close path
+      - A4 captures WPR2 state
+assertions:
+  driver_observable:
+    - close path MUST complete (no hang)
+    - /sys/bus/pci/devices/<BDF>/<A4-last-close-wpr2-path> MUST contain captured value
+    - dmesg MUST contain "last-close WPR2 captured" log line
+  substrate_observable:
+    - WPR2 register read counter increments exactly once during close
+    - no infinite read loop on the close path
+  bounded_timing:
+    close_max_ms: 1000
+source_f_entry: failure-modes/F12-dev-nvidia0-close-wedge.md

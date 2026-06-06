@@ -1,0 +1,26 @@
+failure_mode: F35
+slug: bolt-authorization-gap
+reproducibility: real-hw-only
+substrate_phase: n/a
+preconditions:
+  topology: user-space-class-only
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: real-hw-only
+  args:
+    required_hardware: real-tb-controller + 5090 + boltd daemon
+    required_conditions:
+      - boltd running with user-prompt policy
+      - hot-plug attach with no user present to authorize
+assertions:
+  operator_observable:
+    - 'boltctl list MUST show device in "connected, not-authorized" state'
+    - lspci MUST NOT show the 5090 (never reached kernel PCI enum)
+    - 'mitigation: boltctl enroll --policy=auto <UUID>'
+out_of_scope_notes: |
+  boltd sits ABOVE the substrate in the stack — the substrate's transport
+  adapter exists post-authorization. F35 routes to operator procedure
+  (apnex setup guide: bolt configuration for TB GPUs).
+source_f_entry: failure-modes/F35-bolt-authorization-gap.md

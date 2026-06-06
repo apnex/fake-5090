@@ -1,0 +1,38 @@
+failure_mode: F07
+slug: tb4-misclassified-internal
+reproducibility: substrate-v1
+substrate_phase: 2
+preconditions:
+  topology: tb-attached
+  driver_state: pre-probe
+  workload: idle
+config:
+  topology_chain:
+    - host-bridge
+    - tb-controller
+    - tb-downstream-port
+    - gpu-device
+  pci_is_thunderbolt_attached:
+    expected_return: true
+  external_facing_port_attr:
+    expected: true
+  untrusted_attr:
+    expected: true
+  e1_classifier:
+    expectation: nv->is_external_gpu set true post-E1-patch
+trigger:
+  primitive: topology-enumeration
+  args:
+    fire_during: nv_pci_probe
+assertions:
+  driver_observable:
+    - exactly one log line per probe (E1 single-emission contract)
+    - log line MUST contain "external GPU" classification
+    - /sys/bus/pci/devices/<BDF>/<E1-transport-path> contains "thunderbolt" or "usb4"
+    - nv->is_external_gpu MUST be true
+  substrate_observable:
+    - host queries TB-attached-status; substrate reports true
+    - bridge capability reads match TB downstream-port profile
+  bounded_timing:
+    classification_max_ms: 100  # during probe; effectively synchronous
+source_f_entry: failure-modes/F07-tb4-misclassified-internal.md

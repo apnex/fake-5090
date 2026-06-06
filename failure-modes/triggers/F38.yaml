@@ -1,0 +1,28 @@
+failure_mode: F38
+slug: recovery-primitive-gap
+reproducibility: doc-only
+substrate_phase: n/a
+preconditions:
+  topology: n/a
+  driver_state: n/a
+  workload: n/a
+config: {}
+trigger:
+  primitive: documentation-class
+  args:
+    asserts: doc-presence-only
+assertions:
+  doc_observable:
+    - A3-recovery intent doc MUST contain "Recovery-primitive scope" section
+    - section MUST state chosen primitive (pci_reset_function)
+    - section MUST list bounded cases (function-level wedge recoverable)
+    - section MUST list out-of-scope cases (bus-level, controller-level)
+    - section MUST document operator-mitigation setpci recipes
+    - future-work tracker MUST contain A6/A3-v2 entry with deferred rationale
+    - apnex setup-guide MUST contain "Manual recovery for A3-bounded failures" section
+out_of_scope_notes: |
+  F38 has no substrate-side runtime assertion. It documents the
+  bounded-scope decision for A3's reset primitive. Operator-mitigation
+  pathway (manual setpci SBR-toggle) is documented but not test-automated.
+  Future Phase 3+ substrate work could add bus-level reset primitive support.
+source_f_entry: failure-modes/F38-recovery-primitive-gap.md
